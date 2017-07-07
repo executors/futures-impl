@@ -1,8 +1,50 @@
 #include <atomic>
+#include <thread>
 #include <functional>
 #include <variant>
 #include <exception>
+#include <iostream>
+#include <iomanip>
+
 #include <cassert>
+
+#include <boost/core/lightweight_test.hpp>
+
+template <typename Integral>
+std::string as_binary(Integral i)
+{
+    Integral constexpr base = 2;
+
+    std::string buf;
+
+    bool is_negative = i < 0;
+
+    i = std::abs(i);
+
+    do
+    {
+        Integral digit = i % base;
+
+        char c = [](Integral d) {
+            switch (d)
+            {
+                case 0: return '0';
+                case 1: return '1';
+            }
+            assert(false);
+        }(digit);
+
+        buf.push_back(c);
+
+        i = (i - digit) / base;
+    } while (i != 0);
+
+    buf += (is_negative ? "b0-" : "b0");
+
+    std::reverse(buf.begin(), buf.end());
+
+    return buf;
+}
 
 namespace std2
 {
@@ -12,27 +54,50 @@ struct asynchronous_value
 {
     enum state_type
     {
-        V1 = 0b01,      // Value Set
-        C1 = 0b10,      // Continuation Set
+        UNSET = 0,
 
-        C0V0 = 0b00,    // Continuation Unset, Value Unset
-        C0V1 = 0b01,    // Continuation Unset, Value Set
-        C1V0 = 0b10,    // Continuation Set,   Value Unset
-        C1V1 = 0b11     // Continuation Set,   Value Set
+        VC = 0b10000, // Value        Changing
+        VR = 0b01000, // Value        Ready
+
+        CC = 0b00100, // Continuation Changing
+        CR = 0b00010, // Continuation Ready
+        CX = 0b00001, // Continuation Executed
     };
 
     std::atomic<state_type> state;
     std::function<void(T)>  continuation;
     T                       value;
 
+    constexpr asynchronous_value() noexcept
+      : state{}
+      , continuation{}
+      , value{}
+    {}
+
+    static void check_state_invariants(state_type s)
+    {
+        // No VC0_VR1         (If VR is set, VC must be set)
+        if (s & VR) assert(s & VC);
+        // No CC0_CR1         (If CR is set, CC must be set)
+        if (s & CR) assert(s & CC);
+        // No CR0_CX1         (If CX is set, CR and CC must be set)
+        // No VR0_CC1_CR1_CX1 (If CX is set, VC and VR must be set)
+        if (s & CX) assert((s & CR) && (s & CC) && (s & CR) && (s & CC));
+    }
+
     bool value_ready()
     {
-        return state.load(std::memory_order_seq_cst) & V1;
+        return state.load(std::memory_order_seq_cst) & VR;
     }
 
     bool continuation_ready()
     {
-        return state.load(std::memory_order_seq_cst) & C1;
+        return state.load(std::memory_order_seq_cst) & CR;
+    }
+
+    bool consumed()
+    {
+        return state.load(std::memory_order_seq_cst) & CX;
     }
 
     template <typename U>
@@ -40,21 +105,92 @@ struct asynchronous_value
     {
         state_type expected = state.load(std::memory_order_seq_cst);
 
-        if (expected & V1) throw std::runtime_error("value already set.");
+        check_state_invariants(expected);
 
-        value = std::forward<U>(u);
+        // Value should not be set yet.
+        assert(!(expected & VR));
+        assert(!(expected & VC));
 
-        state_type desired = expected | V1;
+        ///////////////////////////////////////////////////////////////////////
+        // First, attempt to acquire the value "lock" by setting the "value is
+        // being changed" bit (VC).
+
+        auto const acquire_mask_update =
+            [] (state_type s)
+            {
+                return state_type(s | VC);
+            };
+
+        state_type desired = acquire_mask_update(expected);
 
         while (!state.compare_exchange_weak(expected, desired,
                                             std::memory_order_seq_cst))
         {
-            if (expected & V1) throw std::runtime_error("value already set.");
-            desired = expected | V1;
+            // No one else should be setting the value.
+            assert(!(expected & VR));
+            assert(!(expected & VC));
+
+            // The continuation should not have run yet.
+            assert(!(expected & CX));
+
+            desired = acquire_mask_update(expected);
         }
 
-        if (desired | C1)
+        ///////////////////////////////////////////////////////////////////////
+        // We either set the VC bit or raised an error; now we can write to the
+        // value variable.
+
+        value = std::forward<U>(u);
+
+        ///////////////////////////////////////////////////////////////////////
+        // Now we need to release the value "lock" (VC), indicate that the
+        // value is ready, and determine if we need to run the continuation.
+
+        // CAS doesn't update expected when it succeeds, so expected is not up
+        // to date.
+        expected = desired;
+
+        // The "value is being changed" bit (VC) should be set. 
+        assert(expected & VC);
+
+        // The continuation should not have run yet; we've set the value, but
+        // we haven't signalled that it is set.
+        assert(!(expected & CX));
+
+        auto const release_mask_update =
+            [] (state_type s)
+            {
+                if (s & CR) // If the continuation is ready, we'll run it.
+                    return state_type(s | CX | VR);
+                else
+                    return state_type(s | VR);
+            };
+
+        desired = release_mask_update(expected);
+
+        while (!state.compare_exchange_weak(expected, desired,
+                                            std::memory_order_seq_cst))
+        {
+            // No one else should be setting the value.
+            assert(!(expected & VR));
+
+            // The continuation should not have run yet.
+            assert(!(expected & CX));
+
+            desired = acquire_mask_update(expected);
+        }
+
+        ///////////////////////////////////////////////////////////////////////
+        // Execute the continuation if needed (e.g. if we set the CX bit in the
+        // release CAS loop).
+
+        if (desired & CX)
+        {
+            // The continuation should not be empty.
+            assert(continuation);
+
             std::move(continuation)(std::move(value));
+        }
     }
 
     template <typename F>
@@ -62,21 +198,89 @@ struct asynchronous_value
     {
         state_type expected = state.load(std::memory_order_seq_cst);
 
-        if (expected & C1) throw std::runtime_error("value already set.");
+        check_state_invariants(expected);
 
-        continuation = std::forward<F>(f);
+        // Continuation should not be set yet.
+        assert(!(expected & CR));
+        assert(!(expected & CC));
 
-        state_type desired = expected | C1;
+        ///////////////////////////////////////////////////////////////////////
+        // First, attempt to acquire the continuation "lock" by setting the
+        // "continuation is being changed" bit (CC).
+
+        auto const acquire_mask_update =
+            [] (state_type s)
+            {
+                return state_type(s | CC);
+            };
+
+        state_type desired = acquire_mask_update(expected);
 
         while (!state.compare_exchange_weak(expected, desired,
                                             std::memory_order_seq_cst))
         {
-            if (expected & C1) throw std::runtime_error("value already set.");
-            desired = expected | C1;
+            // No one else should be setting the continuation.
+            assert(!(expected & CR));
+            assert(!(expected & CC));
+            assert(!(expected & CX));
+
+            desired = acquire_mask_update(expected);
         }
 
-        if (desired | V1)
+        ///////////////////////////////////////////////////////////////////////
+        // We either set the CC bit or raised an error; now we can write to the
+        // continuation variable.
+
+        continuation = std::forward<F>(f);
+
+        ///////////////////////////////////////////////////////////////////////
+        // Now we need to release the continuation "lock" (CC), indicate that
+        // the continuation is ready, and determine if we need to run the
+        // continuation.
+
+        // CAS doesn't update expected when it succeeds, so expected is not up
+        // to date.
+        expected = desired;
+
+        // The "continuation is being changed" bit (VC) should be set. 
+        assert(expected & CC);
+
+        // The continuation should not have run yet; we've set the
+        // continuation, but we haven't signalled that it is set.
+        assert(!(expected & CX));
+
+        auto const release_mask_update =
+            [] (state_type s)
+            {
+                if (s & VR) // If the value is ready, we'll run the continuation.
+                    return state_type(s | CX | CR);
+                else
+                    return state_type(s | CR);
+            };
+
+        desired = release_mask_update(expected);
+
+        while (!state.compare_exchange_weak(expected, desired,
+                                            std::memory_order_seq_cst))
+        {
+            // No one else should be setting the continuation.
+            assert(!(expected & CR));
+            assert(!(expected & CX));
+
+            desired = acquire_mask_update(expected);
+        }
+
+        ///////////////////////////////////////////////////////////////////////
+        // Execute the continuation if needed (e.g. if we set the CX bit in the
+        // release CAS loop).
+
+        if (desired & CX)
+        {
+            // The continuation should not be empty.
+            assert(continuation);
+
             std::move(continuation)(std::move(value));
+        }
     }
 };
 
@@ -84,5 +288,96 @@ struct asynchronous_value
 
 int main()
 {
+    std::cout << std::setbase(2);
+
+    { // Set value, then set continuation.
+        std2::asynchronous_value<int> a;
+
+        BOOST_TEST_EQ(a.value_ready(),        false);
+        BOOST_TEST_EQ(a.continuation_ready(), false);
+
+        a.set_value(42);
+
+        BOOST_TEST_EQ(a.value_ready(),        true);
+        BOOST_TEST_EQ(a.continuation_ready(), false);
+
+        int a_val = 0;
+
+        a.set_continuation([&a_val] (int v) { a_val = v; }); 
+
+        BOOST_TEST_EQ(a.value_ready(),        true);
+        BOOST_TEST_EQ(a.continuation_ready(), true);
+
+        BOOST_TEST_EQ(a_val, 42);
+    }
+
+    { // Set continuation, then set value.
+        std2::asynchronous_value<int> a;
+
+        BOOST_TEST_EQ(a.value_ready(),        false);
+        BOOST_TEST_EQ(a.continuation_ready(), false);
+
+        int a_val = 0;
+
+        a.set_continuation([&a_val] (int v) { a_val = v; }); 
+
+        BOOST_TEST_EQ(a_val, 0);
+
+        BOOST_TEST_EQ(a.value_ready(),        false);
+        BOOST_TEST_EQ(a.continuation_ready(), true);
+
+        a.set_value(42);
+
+        BOOST_TEST_EQ(a.value_ready(),        true);
+        BOOST_TEST_EQ(a.continuation_ready(), true);
+
+        BOOST_TEST_EQ(a_val, 42);
+    }
+
+    for (int i = 0; i < 64; ++i)
+    {
+        std2::asynchronous_value<int> a;
+
+        std::atomic<int> go_flag(false);
+
+        auto const barrier =
+            [&] () 
+            {
+                go_flag.fetch_add(1, std::memory_order_seq_cst);
+
+                while (go_flag.load(std::memory_order_seq_cst) < 2)
+                    ; // Spin.
+            };
+
+        std::thread t(
+            [&] ()
+            {
+                barrier();
+
+                a.set_value(42);
+            }
+        );
+
+        barrier();        
+
+        int a_val = 0;
+
+        a.set_continuation(
+            [&a_val] (int v)
+            {
+                std::cout << "Running on " << std::this_thread::get_id() << "\n";
+                a_val = v;
+            }
+        ); 
+   
+        t.join();
+
+        BOOST_TEST_EQ(a.value_ready(),        true);
+        BOOST_TEST_EQ(a.continuation_ready(), true);
+
+        BOOST_TEST_EQ(a_val, 42);
+    }
+
+    return boost::report_errors();
 }
 
