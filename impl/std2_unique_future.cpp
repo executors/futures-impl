@@ -1,7 +1,7 @@
 #include <atomic>
 #include <thread>
 #include <functional>
-#include <variant>
+#include <map>
 #include <exception>
 #include <iostream>
 #include <iomanip>
@@ -19,7 +19,8 @@ std::string as_binary(Integral i)
 
     bool is_negative = i < 0;
 
-    i = std::abs(i);
+    if constexpr (std::is_signed_v<Integral>) 
+        i = std::abs(i);
 
     do
     {
@@ -111,30 +112,37 @@ struct asynchronous_value
         assert(!(expected & VR));
         assert(!(expected & VC));
 
+        state_type desired = UNSET;
+
         ///////////////////////////////////////////////////////////////////////
         // First, attempt to acquire the value "lock" by setting the "value is
         // being changed" bit (VC).
 
-        auto const acquire_mask_update =
-            [] (state_type s)
-            {
-                return state_type(s | VC);
-            };
-
-        state_type desired = acquire_mask_update(expected);
-
-        while (!state.compare_exchange_weak(expected, desired,
-                                            std::memory_order_seq_cst))
-        {
-            // No one else should be setting the value.
-            assert(!(expected & VR));
-            assert(!(expected & VC));
-
-            // The continuation should not have run yet.
-            assert(!(expected & CX));
+        { // Introduce a new scope to prevent misuse of the lambda below.
+            auto const acquire_mask_update =
+                [] (state_type s)
+                {
+                    return state_type(s | VC);
+                };
 
             desired = acquire_mask_update(expected);
+
+            while (!state.compare_exchange_weak(expected, desired,
+                                                std::memory_order_seq_cst))
+            {
+                // No one else should be setting the value.
+                assert(!(expected & VR));
+                assert(!(expected & VC));
+
+                // The continuation should not have run yet.
+                assert(!(expected & CX));
+
+                desired = acquire_mask_update(expected);
+            }
         }
+
+        // The continuation should now be changing.
+        assert(desired & VC);
 
         ///////////////////////////////////////////////////////////////////////
         // We either set the VC bit or raised an error; now we can write to the
@@ -157,28 +165,35 @@ struct asynchronous_value
         // we haven't signalled that it is set.
         assert(!(expected & CX));
 
-        auto const release_mask_update =
-            [] (state_type s)
+        { // Introduce a new scope to prevent misuse of the lambda below.
+            auto const release_mask_update =
+                [] (state_type s)
+                {
+                    if (s & CR)
+                        // If the continuation is ready, we'll run it.
+                        return state_type(s | CX | VR);
+                    else
+                        return state_type(s | VR);
+                };
+
+            desired = release_mask_update(expected);
+
+            while (!state.compare_exchange_weak(expected, desired,
+                                                std::memory_order_seq_cst))
             {
-                if (s & CR) // If the continuation is ready, we'll run it.
-                    return state_type(s | CX | VR);
-                else
-                    return state_type(s | VR);
-            };
+                // No one else should be setting the value.
+                assert(!(expected & VR));
 
-        desired = release_mask_update(expected);
+                // The continuation should not have run yet.
+                assert(!(expected & CX));
 
-        while (!state.compare_exchange_weak(expected, desired,
-                                            std::memory_order_seq_cst))
-        {
-            // No one else should be setting the value.
-            assert(!(expected & VR));
+                desired = release_mask_update(expected);
+            }
 
-            // The continuation should not have run yet.
-            assert(!(expected & CX));
-
-            desired = acquire_mask_update(expected);
         }
+
+        // The value should now be ready.
+        assert(desired & VR);
 
         ///////////////////////////////////////////////////////////////////////
         // Execute the continuation if needed (e.g. if we set the CX bit in the
@@ -204,28 +219,35 @@ struct asynchronous_value
         assert(!(expected & CR));
         assert(!(expected & CC));
 
+        state_type desired = UNSET;
+
         ///////////////////////////////////////////////////////////////////////
         // First, attempt to acquire the continuation "lock" by setting the
         // "continuation is being changed" bit (CC).
 
-        auto const acquire_mask_update =
-            [] (state_type s)
-            {
-                return state_type(s | CC);
-            };
-
-        state_type desired = acquire_mask_update(expected);
-
-        while (!state.compare_exchange_weak(expected, desired,
-                                            std::memory_order_seq_cst))
-        {
-            // No one else should be setting the continuation.
-            assert(!(expected & CR));
-            assert(!(expected & CC));
-            assert(!(expected & CX));
+        { // Introduce a new scope to prevent misuse of the lambda below.
+            auto const acquire_mask_update =
+                [] (state_type s)
+                {
+                    return state_type(s | CC);
+                };
 
             desired = acquire_mask_update(expected);
+
+            while (!state.compare_exchange_weak(expected, desired,
+                                                std::memory_order_seq_cst))
+            {
+                // No one else should be setting the continuation.
+                assert(!(expected & CR));
+                assert(!(expected & CC));
+                assert(!(expected & CX));
+
+                desired = acquire_mask_update(expected);
+            }
         }
+
+        // The continuation should now be changing.
+        assert(desired & CC);
 
         ///////////////////////////////////////////////////////////////////////
         // We either set the CC bit or raised an error; now we can write to the
@@ -249,26 +271,32 @@ struct asynchronous_value
         // continuation, but we haven't signalled that it is set.
         assert(!(expected & CX));
 
-        auto const release_mask_update =
-            [] (state_type s)
+        { // Introduce a new scope to prevent misuse of the lambda below.
+            auto const release_mask_update =
+                [] (state_type s)
+                {
+                    if (s & VR)
+                        // If the value is ready, we'll run the continuation.
+                        return state_type(s | CX | CR);
+                    else
+                        return state_type(s | CR);
+                };
+
+            desired = release_mask_update(expected);
+
+            while (!state.compare_exchange_weak(expected, desired,
+                                                std::memory_order_seq_cst))
             {
-                if (s & VR) // If the value is ready, we'll run the continuation.
-                    return state_type(s | CX | CR);
-                else
-                    return state_type(s | CR);
-            };
+                // No one else should be setting the continuation.
+                assert(!(expected & CR));
+                assert(!(expected & CX));
 
-        desired = release_mask_update(expected);
-
-        while (!state.compare_exchange_weak(expected, desired,
-                                            std::memory_order_seq_cst))
-        {
-            // No one else should be setting the continuation.
-            assert(!(expected & CR));
-            assert(!(expected & CX));
-
-            desired = acquire_mask_update(expected);
+                desired = release_mask_update(expected);
+            }
         }
+
+        // The continuation should now be ready.
+        assert(desired & CR);
 
         ///////////////////////////////////////////////////////////////////////
         // Execute the continuation if needed (e.g. if we set the CX bit in the
@@ -334,8 +362,12 @@ int main()
         BOOST_TEST_EQ(a_val, 42);
     }
 
+    std::map<std::thread::id, unsigned> scoreboard;
+
     for (int i = 0; i < 64; ++i)
     {
+        //std::cout << "\n";
+
         std2::asynchronous_value<int> a;
 
         std::atomic<int> go_flag(false);
@@ -363,19 +395,33 @@ int main()
         int a_val = 0;
 
         a.set_continuation(
-            [&a_val] (int v)
+            [&] (int v)
             {
-                std::cout << "Running on " << std::this_thread::get_id() << "\n";
+                ++scoreboard[std::this_thread::get_id()];
+                //std::cout << "Running on " << std::this_thread::get_id() << "\n";
                 a_val = v;
             }
         ); 
    
         t.join();
 
+        //std::cout << as_binary(unsigned(a.state.load(std::memory_order_seq_cst)))
+        //          << "\n";
+
         BOOST_TEST_EQ(a.value_ready(),        true);
         BOOST_TEST_EQ(a.continuation_ready(), true);
 
         BOOST_TEST_EQ(a_val, 42);
+    }
+
+    for (auto&& [id, count] : scoreboard)
+    {
+        if (id == std::this_thread::get_id())
+            std::cout << "Consumer thread";
+        else
+            std::cout << "Producer thread";
+
+        std::cout << " : " << count << "\n";
     }
 
     return boost::report_errors();
