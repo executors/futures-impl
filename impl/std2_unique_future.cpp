@@ -464,10 +464,71 @@ struct asynchronous_value
     } // }}}
 };
 
-struct default_executor;
-
 template <typename... Ts>
 struct unique_future;
+
+template <typename... Ts>
+struct unique_promise;
+
+struct default_executor
+{
+    template <typename F, typename... Args>
+    void execute(F&& f, Args&&... args)
+    { // {{{
+        std::forward<F>(f)(std::forward<Args>(args)...);
+    } // }}}
+
+    template <typename F, typename... Args>
+    auto async(F&& f, Args&&... args)
+        -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
+    { // {{{
+        using promise_type = std::conditional_t<
+            std::is_same_v<
+                decltype(std::declval<F>()(std::declval<Args>()...)), void
+            >
+          , unique_promise<>
+          , unique_promise<decltype(std::declval<F>()(std::declval<Args>()...))>
+        >;
+        promise_type p;
+        auto g = p.get_future();
+        std::thread t(
+            [ f = std::forward<F>(f)
+            , args = std::forward_as_tuple(std::forward<Args>(args)...)
+            , p = std::move(p)]
+            () mutable
+            {
+                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
+                {
+                    std::apply(f, std::move(args));
+                    p.set();
+                }
+                else
+                    p.set(std::apply(std::forward<F>(f), std::move(args)));
+            }
+        );
+        return g;
+    } // }}}
+
+    template <typename... Ts>
+    auto depend(unique_future<Ts...> f)
+    { // {{{
+        semaphore sem;
+
+        std::optional<std::tuple<Ts...>> v;
+
+        f.then(
+            [&] (auto&&... args)
+            {
+                v = std::make_tuple(std::forward<decltype(args)>(args)...);
+                sem.notify();
+            }
+        );
+
+        sem.wait();
+
+        return std::move(v);
+    } // }}}
+};
 
 template <typename... Ts>
 struct unique_promise
@@ -594,66 +655,6 @@ struct unique_future
             return data->try_get();
         else
             return {};
-    } // }}}
-};
-
-struct default_executor
-{
-    template <typename F, typename... Args>
-    void execute(F&& f, Args&&... args)
-    { // {{{
-        std::forward<F>(f)(std::forward<Args>(args)...);
-    } // }}}
-
-    template <typename F, typename... Args>
-    auto async(F&& f, Args&&... args)
-        -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
-    { // {{{
-        using promise_type = std::conditional_t<
-            std::is_same_v<
-                decltype(std::declval<F>()(std::declval<Args>()...)), void
-            >
-          , unique_promise<>
-          , unique_promise<decltype(std::declval<F>()(std::declval<Args>()...))>
-        >;
-        promise_type p;
-        auto g = p.get_future();
-        std::thread t(
-            [ f = std::forward<F>(f)
-            , args = std::forward_as_tuple(std::forward<Args>(args)...)
-            , p = std::move(p)]
-            () mutable
-            {
-                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
-                {
-                    std::apply(f, std::move(args));
-                    p.set();
-                }
-                else
-                    p.set(std::apply(std::forward<F>(f), std::move(args)));
-            }
-        );
-        return g;
-    } // }}}
-
-    template <typename... Ts>
-    auto depend(unique_future<Ts...> f)
-    { // {{{
-        semaphore sem;
-
-        std::optional<std::tuple<Ts...>> v;
-
-        f.then(
-            [&] (auto&&... args)
-            {
-                v = std::make_tuple(std::forward<decltype(args)>(args)...);
-                sem.notify();
-            }
-        );
-
-        sem.wait();
-
-        return std::move(v);
     } // }}}
 };
 
