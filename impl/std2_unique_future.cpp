@@ -526,7 +526,7 @@ struct default_executor
 
         sem.wait();
 
-        return std::move(v);
+        return std::move(*v);
     } // }}}
 };
 
@@ -562,6 +562,13 @@ struct unique_promise
     // Not CopyAssignable
     unique_promise(unique_promise const&) = delete;
     unique_promise& operator=(unique_promise const&) = delete;
+
+    bool ready() const
+    { // {{{
+        if (data)
+            return data->value_ready();
+        return false;
+    } // }}}
 
     unique_future<Ts...> get_future()
     { // {{{
@@ -605,6 +612,13 @@ struct unique_future
     // Not CopyAssignable
     unique_future(unique_future const&) = delete;
     unique_future& operator=(unique_future const&) = delete;
+
+    bool ready() const
+    { // {{{
+        if (data)
+            return data->value_ready();
+        return false;
+    } // }}}
 
     template <typename Executor, typename F>
     // {{{ unique_future<...>
@@ -655,6 +669,17 @@ struct unique_future
             return data->try_get();
         else
             return {};
+    } // }}}
+
+    template <typename Executor>
+    std::tuple<Ts...> get(Executor&& exec)
+    { // {{{
+        return std::forward<Executor>(exec).depend(std::move(*this));
+    } // }}}
+
+    std::tuple<Ts...> get() 
+    { // {{{
+        return get(default_executor{}); 
     } // }}}
 };
 
@@ -714,73 +739,75 @@ int main()
         BOOST_TEST_EQ(a_val, 42);
     }
 
-    unsigned producer_count = 0;
-    unsigned consumer_count = 0;
-
-    for (int i = 0; i < 128; ++i)
     {
-        std2::asynchronous_value<std::string> a;
+        unsigned producer_count = 0;
+        unsigned consumer_count = 0;
 
-        std::atomic<int> go_flag(false);
+        for (int i = 0; i < 128; ++i)
+        {
+            std2::asynchronous_value<std::string> a;
 
-        auto const barrier =
-            [&] () 
-            {
-                go_flag.fetch_add(1, std::memory_order_relaxed);
+            std::atomic<int> go_flag(false);
 
-                while (go_flag.load(std::memory_order_relaxed) < 2)
-                    ; // Spin.
-            };
+            auto const barrier =
+                [&] () 
+                {
+                    go_flag.fetch_add(1, std::memory_order_relaxed);
 
-        std::string a_val = "";
+                    while (go_flag.load(std::memory_order_relaxed) < 2)
+                        ; // Spin.
+                };
 
-        std::thread producer(
-            [&] ()
-            {
-                barrier();
+            std::string a_val = "";
 
-                a.set_value(
-                    "foo foo foo foo foo foo foo foo foo foo "
-                    "foo foo foo foo foo foo foo foo foo foo"
-                );
-            }
-        );
+            std::thread producer(
+                [&] ()
+                {
+                    barrier();
 
-        barrier();        
+                    a.set_value(
+                        "foo foo foo foo foo foo foo foo foo foo "
+                        "foo foo foo foo foo foo foo foo foo foo"
+                    );
+                }
+            );
 
-        a.set_continuation(
-            std2::default_executor{}
-          , [&] (std::string v)
-            {
-                a_val = v;
+            barrier();        
 
-                if (std::this_thread::get_id() == producer.get_id())
-                    ++producer_count;
-                else
-                    ++consumer_count;
-            }
-        );
-   
-        producer.join();
+            a.set_continuation(
+                std2::default_executor{}
+              , [&] (std::string v)
+                {
+                    a_val = v;
 
-        //std::cout << std::bitset<6>(a.status()) << "\n";
+                    if (std::this_thread::get_id() == producer.get_id())
+                        ++producer_count;
+                    else
+                        ++consumer_count;
+                }
+            );
+       
+            producer.join();
 
-        BOOST_TEST_EQ(a.value_ready(),        true);
-        BOOST_TEST_EQ(a.continuation_ready(), true);
+            //std::cout << std::bitset<6>(a.status()) << "\n";
 
-        BOOST_TEST_EQ(
-            a_val
-          , "foo foo foo foo foo foo foo foo foo foo "
-            "foo foo foo foo foo foo foo foo foo foo"
-        );
+            BOOST_TEST_EQ(a.value_ready(),        true);
+            BOOST_TEST_EQ(a.continuation_ready(), true);
+
+            BOOST_TEST_EQ(
+                a_val
+              , "foo foo foo foo foo foo foo foo foo foo "
+                "foo foo foo foo foo foo foo foo foo foo"
+            );
+        }
+
+        std::cout << "Consumer thread ran the continuation in "
+                  << consumer_count
+                  << " trials\n";
+        std::cout << "Producer thread ran the continuation in "
+                  << producer_count
+                  << " trials\n";
     }
-
-    std::cout << "Consumer thread ran the continuation in "
-              << consumer_count
-              << " trials\n";
-    std::cout << "Producer thread ran the continuation in "
-              << producer_count
-              << " trials\n";
 
     { // Set value, then set continuation.
         std2::unique_promise<int> p;
@@ -834,6 +861,73 @@ int main()
         auto [a_val] = (*p.get_future().try_get());
 
         BOOST_TEST_EQ(a_val, 42);
+    }
+
+    {
+        unsigned producer_count = 0;
+        unsigned consumer_count = 0;
+
+        for ( int i = 0
+            ; ((consumer_count < 32) || (producer_count < 32)) && i < (1 << 15)
+            ; ++i
+            )
+        {
+            std2::unique_promise<std::string> p;
+
+            std2::unique_future<std::string> f = p.get_future();
+
+            std::atomic<int> go_flag(false);
+
+            auto const barrier =
+                [&] () 
+                {
+                    go_flag.fetch_add(1, std::memory_order_relaxed);
+
+                    while (go_flag.load(std::memory_order_relaxed) < 2)
+                        ; // Spin.
+                };
+
+            std::thread producer(
+                [&] ()
+                {
+                    barrier();
+
+                    p.set(
+                        "foo foo foo foo foo foo foo foo foo foo "
+                        "foo foo foo foo foo foo foo foo foo foo"
+                    );
+                }
+            );
+
+            barrier();        
+
+            for (int j = 0; j < 6; ++j)
+                std::this_thread::yield();
+
+            if (f.ready())
+                ++producer_count;
+            else
+                ++consumer_count;
+
+            auto [a_val] = f.get();
+
+            BOOST_TEST_EQ(f.ready(), false);
+
+            BOOST_TEST_EQ(
+                a_val
+              , "foo foo foo foo foo foo foo foo foo foo "
+                "foo foo foo foo foo foo foo foo foo foo"
+            );
+
+            producer.join();
+        }
+
+        std::cout << "Consumer thread ran the continuation in "
+                  << consumer_count
+                  << " trials\n";
+        std::cout << "Producer thread ran the continuation in "
+                  << producer_count
+                  << " trials\n";
     }
 
     return boost::report_errors();
