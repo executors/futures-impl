@@ -743,7 +743,10 @@ int main()
         unsigned producer_count = 0;
         unsigned consumer_count = 0;
 
-        for (int i = 0; i < 128; ++i)
+        for ( int i = 0
+            ; ((consumer_count < 32) || (producer_count < 32)) && i < (1 << 15)
+            ; ++i
+            )
         {
             std2::asynchronous_value<std::string> a;
 
@@ -807,6 +810,9 @@ int main()
         std::cout << "Producer thread ran the continuation in "
                   << producer_count
                   << " trials\n";
+
+        BOOST_TEST(consumer_count >= 1);
+        BOOST_TEST(producer_count >= 1);
     }
 
     { // Set value, then set continuation.
@@ -928,6 +934,9 @@ int main()
         std::cout << "Producer thread ran the continuation in "
                   << producer_count
                   << " trials\n";
+
+        BOOST_TEST(consumer_count >= 1);
+        BOOST_TEST(producer_count >= 1);
     }
 
     return boost::report_errors();
