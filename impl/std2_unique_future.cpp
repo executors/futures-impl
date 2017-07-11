@@ -425,14 +425,14 @@ struct asynchronous_value
         }
     } // }}}
 
-    std::optional<T> try_get() const
+    std::optional<T> try_get() 
     { // {{{
         state_type expected = state.load(std::memory_order_seq_cst);
 
         check_state_invariants(expected);
 
         // Value has not been set yet.
-        if (!(expected & VC & VR))
+        if (!(expected & VR))
             return {};
 
         // No continuation should be set (or be in the process of being set),
@@ -775,6 +775,32 @@ int main()
         BOOST_TEST_EQ(a_val, 0);
 
         p.set(42);
+
+        BOOST_TEST_EQ(a_val, 42);
+    }
+
+    { // Set value, then set continuation.
+        std2::unique_promise<int> p;
+
+        p.set(42);
+
+        auto [a_val] = (*p.get_future().try_get());
+
+        BOOST_TEST_EQ(a_val, 42);
+    }
+
+    { // Set continuation, then set value.
+        std2::unique_promise<int> p;
+
+        std2::unique_future<int> f = p.get_future();
+
+        std::optional<std::tuple<int>> maybe_a_val = f.try_get();
+
+        BOOST_TEST_EQ(maybe_a_val.has_value(), false);
+
+        p.set(42);
+
+        auto [a_val] = (*p.get_future().try_get());
 
         BOOST_TEST_EQ(a_val, 42);
     }
