@@ -219,7 +219,7 @@ struct asynchronous_value
     template <typename U>
     void set_value(U&& u)
     { // {{{
-        state_type expected = state.load(std::memory_order_seq_cst);
+        state_type expected = state.load(std::memory_order_acquire);
 
         check_state_invariants(expected);
 
@@ -243,7 +243,7 @@ struct asynchronous_value
             desired = acquire_mask_update(expected);
 
             while (!state.compare_exchange_weak(expected, desired,
-                                                std::memory_order_seq_cst))
+                                                std::memory_order_acq_rel))
             {
                 // No one else should be setting the value.
                 assert(!(expected & VR));
@@ -294,7 +294,7 @@ struct asynchronous_value
             desired = release_mask_update(expected);
 
             while (!state.compare_exchange_weak(expected, desired,
-                                                std::memory_order_seq_cst))
+                                                std::memory_order_acq_rel))
             {
                 // No one else should be setting the value.
                 assert(!(expected & VR));
@@ -325,7 +325,7 @@ struct asynchronous_value
     template <typename Executor, typename F>
     void set_continuation(Executor&& exec, F&& f)
     { // {{{
-        state_type expected = state.load(std::memory_order_seq_cst);
+        state_type expected = state.load(std::memory_order_acquire);
 
         check_state_invariants(expected);
 
@@ -349,7 +349,7 @@ struct asynchronous_value
             desired = acquire_mask_update(expected);
 
             while (!state.compare_exchange_weak(expected, desired,
-                                                std::memory_order_seq_cst))
+                                                std::memory_order_acq_rel))
             {
                 // No one else should be setting the continuation.
                 assert(!(expected & CR));
@@ -404,7 +404,7 @@ struct asynchronous_value
             desired = release_mask_update(expected);
 
             while (!state.compare_exchange_weak(expected, desired,
-                                                std::memory_order_seq_cst))
+                                                std::memory_order_acq_rel))
             {
                 // No one else should be setting the continuation.
                 assert(!(expected & CR));
@@ -432,7 +432,7 @@ struct asynchronous_value
 
     std::optional<T> try_get() 
     { // {{{
-        state_type expected = state.load(std::memory_order_seq_cst);
+        state_type expected = state.load(std::memory_order_acquire);
 
         check_state_invariants(expected);
 
@@ -451,16 +451,16 @@ struct asynchronous_value
             state_type desired = consume_mask_update(expected);
 
             while (!state.compare_exchange_weak(expected, desired,
-                                                std::memory_order_seq_cst))
+                                                std::memory_order_acq_rel))
             {
-                // The value  should not have been consumed.
+                // The value should not have been consumed.
                 assert(!(expected & CX));
 
                 desired = consume_mask_update(expected);
             }
         }
 
-        return {std::move(value)};
+        return { std::move(value) };
     } // }}}
 };
 
