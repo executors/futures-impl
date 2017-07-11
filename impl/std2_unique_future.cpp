@@ -590,15 +590,15 @@ struct default_executor
     } // }}}
 
     template <typename F, typename... Args>
-    unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
-    async(F&& f, Args&&... args)
+    auto async(F&& f, Args&&... args) -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
+
     { // {{{
         using promise_type = std::conditional_t<
             std::is_same_v<
                 decltype(std::declval<F>()(std::declval<Args>()...)), void
             >
           , unique_promise<>
-          , unique_promise<decltype(std::declval<F>()(std::declval<Ts>()...))>
+          , unique_promise<decltype(std::declval<F>()(std::declval<Args>()...))>
         >;
         promise_type p;
         auto g = p.get_future();
