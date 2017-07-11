@@ -1,60 +1,164 @@
 #include <atomic>
+#include <condition_variable>
 #include <thread>
 #include <functional>
 #include <map>
 #include <exception>
 #include <iostream>
 #include <iomanip>
+#include <bitset>
+#include <optional>
 
 #include <cassert>
 
 #include <boost/core/lightweight_test.hpp>
 
-template <typename Integral>
-std::string as_binary(Integral i)
-{
-    Integral constexpr base = 2;
-
-    std::string buf;
-
-    bool is_negative = i < 0;
-
-    if constexpr (std::is_signed_v<Integral>) 
-        i = std::abs(i);
-
-    do
-    {
-        Integral digit = i % base;
-
-        char c = [](Integral d) {
-            switch (d)
-            {
-                case 0: return '0';
-                case 1: return '1';
-            }
-            assert(false);
-        }(digit);
-
-        buf.push_back(c);
-
-        i = (i - digit) / base;
-    } while (i != 0);
-
-    buf += (is_negative ? "b0-" : "b0");
-
-    std::reverse(buf.begin(), buf.end());
-
-    return buf;
-}
-
 namespace std2
 {
+
+template <typename Sig>
+struct fire_once;
+
+template <typename T>
+struct emplace_as {};
+
+template <typename R, typename... Args>
+struct fire_once<R(Args...)>
+{
+  private:
+
+    std::unique_ptr<void, void(*)(void*)> ptr{nullptr, +[] (void*) {}};
+    void(*invoke)(void*, Args...) = nullptr;
+
+  public:
+
+    constexpr fire_once() = default;
+
+    constexpr fire_once(fire_once&&) = default;
+    constexpr fire_once& operator=(fire_once&&) = default;
+
+    template <
+        typename F
+        // {{{ SFINAE
+      , std::enable_if_t<!std::is_same_v<std::decay_t<F>, fire_once>, int> = 0
+      , std::enable_if_t<
+               std::is_convertible_v<
+                 std::result_of_t<std::decay_t<F>&(Args...)>, R
+               >
+            || std::is_same_v<R, void>
+          , int
+        > = 0
+        // }}}
+    >
+    fire_once(F&& f)
+    // {{{
+      : fire_once(emplace_as<std::decay_t<F>>{}, std::forward<F>(f))
+    {}
+    // }}}
+
+    template <typename F, typename...FArgs>
+    fire_once(emplace_as<F>, FArgs&&...fargs)
+    { // {{{
+        rebind<F>(std::forward<FArgs>(fargs)...);
+    } // }}}
+
+    R operator()(Args... args) &&
+    { // {{{
+        try {
+            if constexpr (std::is_same_v<R, void>)
+            {
+                invoke(ptr.get(), std::forward<Args>(args)...);
+                clear();
+            }
+            else
+            {
+                R ret = invoke(ptr.get(), std::forward<Args>(args)...);
+                clear();
+                return ret;
+            }
+        } catch (...) {
+            clear();
+            throw;
+        }
+    } // }}}
+
+    void clear()
+    { // {{{
+        invoke = nullptr;
+        ptr.reset();
+    } // }}}
+
+    explicit operator bool() const
+    { // {{{
+        return bool(ptr);
+    } // }}}
+
+    template <typename F, typename...FArgs>
+    void rebind(FArgs&&... fargs)
+    { // {{{
+        clear();
+        auto pf = std::make_unique<F>(std::forward<FArgs>(fargs)...);
+        invoke =
+            +[](void* pf, Args...args) -> R
+            {
+                return (*reinterpret_cast<F*>(pf))(std::forward<Args>(args)...);
+            };
+        ptr = { pf.release(), [] (void* pf) { delete (F*)(pf); } };
+    } // }}}
+};
+
+struct semaphore
+{
+    semaphore()
+    // {{{
+      : count{0}
+    {}
+    // }}}
+
+    void notify(std::size_t i = 1)
+    { // {{{
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            count += i;
+        }
+
+        while (i--)
+            condition.notify_one();
+    } // }}}
+
+    void wait()
+    { // {{{
+        std::unique_lock<std::mutex> lock(mutex);
+
+        while (!count)
+            condition.wait(lock);
+
+        --count;
+    } // }}}
+
+    bool try_wait()
+    { // {{{
+        std::unique_lock<std::mutex> lock(mutex);
+
+        if (!count)
+            return false;
+
+        --count;
+
+        return true;
+    } // }}}
+
+  private:
+    std::mutex               mutex;
+    std::condition_variable  condition;
+    std::atomic<std::size_t> count;
+};
 
 template <typename T>
 struct asynchronous_value
 {
     enum state_type
-    {
+    { // {{{
         UNSET = 0,
 
         VC = 0b10000, // Value        Changing
@@ -63,20 +167,16 @@ struct asynchronous_value
         CC = 0b00100, // Continuation Changing
         CR = 0b00010, // Continuation Ready
         CX = 0b00001, // Continuation Executed
-    };
+    }; // }}}
+
+  private:
 
     std::atomic<state_type> state;
-    std::function<void(T)>  continuation;
+    fire_once<void(T)>      continuation;
     T                       value;
 
-    constexpr asynchronous_value() noexcept
-      : state{}
-      , continuation{}
-      , value{}
-    {}
-
     static void check_state_invariants(state_type s)
-    {
+    { // {{{
         // No VC0_VR1         (If VR is set, VC must be set)
         if (s & VR) assert(s & VC);
         // No CC0_CR1         (If CR is set, CC must be set)
@@ -84,26 +184,41 @@ struct asynchronous_value
         // No CR0_CX1         (If CX is set, CR and CC must be set)
         // No VR0_CC1_CR1_CX1 (If CX is set, VC and VR must be set)
         if (s & CX) assert((s & CR) && (s & CC) && (s & CR) && (s & CC));
-    }
+    } // }}}
 
-    bool value_ready()
-    {
-        return state.load(std::memory_order_seq_cst) & VR;
-    }
+  public:
 
-    bool continuation_ready()
-    {
-        return state.load(std::memory_order_seq_cst) & CR;
-    }
+    constexpr asynchronous_value() noexcept
+    // {{{
+      : state{}
+      , continuation{}
+      , value{}
+    {}
+    // }}}
 
-    bool consumed()
-    {
-        return state.load(std::memory_order_seq_cst) & CX;
-    }
+    state_type status() const
+    { // {{{
+        return state.load(std::memory_order_acquire);
+    } // }}}
+
+    bool value_ready() const
+    { // {{{
+        return state.load(std::memory_order_acquire) & VR;
+    } // }}}
+
+    bool continuation_ready() const
+    { // {{{
+        return state.load(std::memory_order_acquire) & CR;
+    } // }}}
+
+    bool consumed() const
+    { // {{{
+        return state.load(std::memory_order_acquire) & CX;
+    } // }}}
 
     template <typename U>
     void set_value(U&& u)
-    {
+    { // {{{
         state_type expected = state.load(std::memory_order_seq_cst);
 
         check_state_invariants(expected);
@@ -189,7 +304,6 @@ struct asynchronous_value
 
                 desired = release_mask_update(expected);
             }
-
         }
 
         // The value should now be ready.
@@ -206,11 +320,11 @@ struct asynchronous_value
 
             std::move(continuation)(std::move(value));
         }
-    }
+    } // }}}
 
     template <typename F>
     void set_continuation(F&& f)
-    {
+    { // {{{
         state_type expected = state.load(std::memory_order_seq_cst);
 
         check_state_invariants(expected);
@@ -253,7 +367,7 @@ struct asynchronous_value
         // We either set the CC bit or raised an error; now we can write to the
         // continuation variable.
 
-        continuation = std::forward<F>(f);
+        continuation = std::move(f);
 
         ///////////////////////////////////////////////////////////////////////
         // Now we need to release the continuation "lock" (CC), indicate that
@@ -309,7 +423,222 @@ struct asynchronous_value
 
             std::move(continuation)(std::move(value));
         }
-    }
+    } // }}}
+
+    std::optional<T> try_get() const
+    { // {{{
+        state_type expected = state.load(std::memory_order_seq_cst);
+
+        check_state_invariants(expected);
+
+        // Value has not been set yet.
+        if (!(expected & VC & VR))
+            return {};
+
+        // No continuation should be set (or be in the process of being set),
+        // and the value should not have been consumed.
+        assert(expected & CC || expected && CR || expected && CX);
+
+        { // Introduce a new scope to prevent misuse of the lambda below.
+            auto const consume_mask_update =
+                [] (state_type s) { return state_type(s | CX); };
+
+            state_type desired = consume_mask_update(expected);
+
+            while (!state.compare_exchange_weak(expected, desired,
+                                                std::memory_order_seq_cst))
+            {
+                // The value  should not have been consumed.
+                assert(!(expected & CX));
+
+                desired = consume_mask_update(expected);
+            }
+        }
+
+        return {std::move(value)};
+    } // }}}
+};
+
+template <typename... Ts>
+struct unique_future;
+
+template <typename... Ts>
+struct unique_promise
+{
+  private:
+    std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> data;
+    bool future_retrieved; // If !data, this must be false.
+
+    void deferred_data_allocation()
+    { // {{{
+        if (!data)
+        {
+            assert(!future_retrieved);
+            data = std::make_shared<asynchronous_value<std::tuple<Ts...>>>();
+        }
+    } // }}}
+
+  public:
+    // DefaultConstructible
+    constexpr unique_promise() noexcept
+    // {{{
+      : data{}
+      , future_retrieved{}
+    {}
+    // }}}
+
+    // MoveAssignable 
+    constexpr unique_promise(unique_promise&&) noexcept = default;
+    constexpr unique_promise& operator=(unique_promise&&) noexcept = default;
+
+    // Not CopyAssignable
+    unique_promise(unique_promise const&) = delete;
+    unique_promise& operator=(unique_promise const&) = delete;
+
+    unique_future<Ts...> get_future()
+    { // {{{
+        // Exits via error if the future has been retrieved.
+        deferred_data_allocation();
+        future_retrieved = true; 
+        return unique_future<Ts...>(data);
+    } // }}}
+
+    template <typename... Us>
+    void set(Us&&... us)
+    { // {{{
+        deferred_data_allocation();
+        data->set_value(std::tuple<Ts...>(std::forward<Us>(us)...));
+    } // }}}
+};
+
+template <typename... Ts>
+struct unique_future
+{
+    std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> data;
+
+  private:
+    unique_future(std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> ptr)
+    // {{{
+      : data(ptr)
+    {}
+    // }}}
+
+    friend class unique_promise<Ts...>;
+
+  public:
+
+    // DefaultConstructible
+    constexpr unique_future() noexcept = default;
+
+    // MoveAssignable 
+    constexpr unique_future(unique_future&&) noexcept = default;
+    constexpr unique_future& operator=(unique_future&&) noexcept = default;
+
+    // Not CopyAssignable
+    unique_future(unique_future const&) = delete;
+    unique_future& operator=(unique_future const&) = delete;
+
+    template <typename F>
+    std::conditional_t<
+        std::is_same_v<decltype(std::declval<F>()(std::declval<Ts>()...)), void>
+      , unique_future<>
+      , unique_future<decltype(std::declval<F>()(std::declval<Ts>()...))>
+    >
+    then(F f)
+    { // {{{
+        using promise_type = std::conditional_t<
+            std::is_same_v<
+                decltype(std::declval<F>()(std::declval<Ts>()...)), void
+            >
+          , unique_promise<>
+          , unique_promise<decltype(std::declval<F>()(std::declval<Ts>()...))>
+        >;
+        assert(data);
+        promise_type p;
+        auto g = p.get_future();
+        data->set_continuation(
+            [f = std::forward<F>(f), p = std::move(p)] 
+            (std::tuple<Ts...> v) mutable
+            {
+                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
+                {
+                    std::apply(f, std::move(v));
+                    p.set();
+                }
+                else
+                    p.set(std::apply(std::forward<F>(f), std::move(v)));
+            }
+        );
+        return g;
+    } // }}}
+
+    std::optional<std::tuple<Ts...>> try_get()
+    { // {{{
+        if (data)
+            return data->try_get();
+        else
+            return {};
+    } // }}}
+};
+
+struct default_executor
+{
+    template <typename F>
+    void execute(F&& f)
+    { // {{{
+        std::forward<F>(f);
+    } // }}}
+
+    template <typename F, typename... Args>
+    unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
+    async(F&& f, Args&&... args)
+    { // {{{
+        using promise_type = std::conditional_t<
+            std::is_same_v<
+                decltype(std::declval<F>()(std::declval<Args>()...)), void
+            >
+          , unique_promise<>
+          , unique_promise<decltype(std::declval<F>()(std::declval<Ts>()...))>
+        >;
+        promise_type p;
+        auto g = p.get_future();
+        std::thread t(
+            [ f = std::forward<F>(f)
+            , args = std::forward_as_tuple(std::forward<Args>(args)...)
+            , p = std::move(p)]
+            () mutable
+            {
+                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
+                {
+                    std::apply(f, std::move(args));
+                    p.set();
+                }
+                else
+                    p.set(std::apply(std::forward<F>(f), std::move(args)));
+            }
+        );
+        return g;
+    } // }}}
+
+    template <typename... Ts>
+    auto depend(unique_future<Ts...> f)
+    { // {{{
+        semaphore sem;
+
+        std::optional<std::tuple<Ts...>> v;
+
+        f.then(
+            [&] (auto&&... args)
+            {
+                v = std::make_tuple(std::forward<decltype(args)>(args)...);
+                sem.notify();
+            }
+        );
+
+        sem.wait();
+
+        return std::move(v);
+    } // }}}
 };
 
 }
@@ -362,66 +691,92 @@ int main()
         BOOST_TEST_EQ(a_val, 42);
     }
 
-    std::map<std::thread::id, unsigned> scoreboard;
+    unsigned producer_count = 0;
+    unsigned consumer_count = 0;
 
-    for (int i = 0; i < 64; ++i)
+    for (int i = 0; i < 128; ++i)
     {
-        //std::cout << "\n";
-
-        std2::asynchronous_value<int> a;
+        std2::asynchronous_value<std::string> a;
 
         std::atomic<int> go_flag(false);
 
         auto const barrier =
             [&] () 
             {
-                go_flag.fetch_add(1, std::memory_order_seq_cst);
+                go_flag.fetch_add(1, std::memory_order_relaxed);
 
-                while (go_flag.load(std::memory_order_seq_cst) < 2)
+                while (go_flag.load(std::memory_order_relaxed) < 2)
                     ; // Spin.
             };
 
-        std::thread t(
+        std::string a_val = "";
+
+        std::thread producer(
             [&] ()
             {
                 barrier();
 
-                a.set_value(42);
+                a.set_value("foo");
             }
         );
 
         barrier();        
 
-        int a_val = 0;
-
         a.set_continuation(
-            [&] (int v)
+            [&] (std::string v)
             {
-                ++scoreboard[std::this_thread::get_id()];
-                //std::cout << "Running on " << std::this_thread::get_id() << "\n";
                 a_val = v;
-            }
-        ); 
-   
-        t.join();
 
-        //std::cout << as_binary(unsigned(a.state.load(std::memory_order_seq_cst)))
-        //          << "\n";
+                if (std::this_thread::get_id() == producer.get_id())
+                    ++producer_count;
+                else
+                    ++consumer_count;
+            }
+        );
+   
+        producer.join();
+
+        //std::cout << std::bitset<6>(a.status()) << "\n";
 
         BOOST_TEST_EQ(a.value_ready(),        true);
         BOOST_TEST_EQ(a.continuation_ready(), true);
 
+        BOOST_TEST_EQ(a_val, "foo");
+    }
+
+    std::cout << "Consumer thread ran the continuation in "
+              << consumer_count
+              << " trials\n";
+    std::cout << "Producer thread ran the continuation in "
+              << producer_count
+              << " trials\n";
+
+    { // Set value, then set continuation.
+        std2::unique_promise<int> p;
+
+        p.set(42);
+
+        std2::unique_future<int> f = p.get_future();
+
+        int a_val = 0;
+        f.then([&a_val] (int v) { a_val = v; }); 
+
         BOOST_TEST_EQ(a_val, 42);
     }
 
-    for (auto&& [id, count] : scoreboard)
-    {
-        if (id == std::this_thread::get_id())
-            std::cout << "Consumer thread";
-        else
-            std::cout << "Producer thread";
+    { // Set continuation, then set value.
+        std2::unique_promise<int> p;
 
-        std::cout << " : " << count << "\n";
+        std2::unique_future<int> f = p.get_future();
+
+        int a_val = 0;
+        f.then([&a_val] (int v) { a_val = v; }); 
+
+        BOOST_TEST_EQ(a_val, 0);
+
+        p.set(42);
+
+        BOOST_TEST_EQ(a_val, 42);
     }
 
     return boost::report_errors();
