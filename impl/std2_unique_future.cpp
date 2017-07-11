@@ -322,8 +322,8 @@ struct asynchronous_value
         }
     } // }}}
 
-    template <typename F>
-    void set_continuation(F&& f)
+    template <typename Executor, typename F>
+    void set_continuation(Executor&& exec, F&& f)
     { // {{{
         state_type expected = state.load(std::memory_order_seq_cst);
 
@@ -367,7 +367,12 @@ struct asynchronous_value
         // We either set the CC bit or raised an error; now we can write to the
         // continuation variable.
 
-        continuation = std::move(f);
+        continuation =
+            [exec = std::forward<Executor>(exec), f = std::forward<F>(f)]
+            (auto&&... args) mutable
+            {
+                exec.execute(std::move(f), std::forward<decltype(args)>(args)...);
+            };
 
         ///////////////////////////////////////////////////////////////////////
         // Now we need to release the continuation "lock" (CC), indicate that
@@ -459,6 +464,8 @@ struct asynchronous_value
     } // }}}
 };
 
+struct default_executor;
+
 template <typename... Ts>
 struct unique_future;
 
@@ -538,13 +545,15 @@ struct unique_future
     unique_future(unique_future const&) = delete;
     unique_future& operator=(unique_future const&) = delete;
 
-    template <typename F>
+    template <typename Executor, typename F>
+    // {{{ unique_future<...>
     std::conditional_t<
         std::is_same_v<decltype(std::declval<F>()(std::declval<Ts>()...)), void>
       , unique_future<>
       , unique_future<decltype(std::declval<F>()(std::declval<Ts>()...))>
     >
-    then(F f)
+    // }}}
+    then(Executor&& exec, F&& f)
     { // {{{
         using promise_type = std::conditional_t<
             std::is_same_v<
@@ -557,7 +566,8 @@ struct unique_future
         promise_type p;
         auto g = p.get_future();
         data->set_continuation(
-            [f = std::forward<F>(f), p = std::move(p)] 
+            std::forward<Executor>(exec)
+          , [f = std::forward<F>(f), p = std::move(p)] 
             (std::tuple<Ts...> v) mutable
             {
                 if constexpr (std::is_same_v<promise_type, unique_promise<>>)
@@ -572,6 +582,12 @@ struct unique_future
         return g;
     } // }}}
 
+    template <typename F>
+    auto then(F&& f)
+    { // {{{
+        return then(default_executor{}, std::forward<F>(f));
+    } // }}}
+
     std::optional<std::tuple<Ts...>> try_get()
     { // {{{
         if (data)
@@ -583,15 +599,15 @@ struct unique_future
 
 struct default_executor
 {
-    template <typename F>
-    void execute(F&& f)
+    template <typename F, typename... Args>
+    void execute(F&& f, Args&&... args)
     { // {{{
-        std::forward<F>(f);
+        std::forward<F>(f)(std::forward<Args>(args)...);
     } // }}}
 
     template <typename F, typename... Args>
-    auto async(F&& f, Args&&... args) -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
-
+    auto async(F&& f, Args&&... args)
+        -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
     { // {{{
         using promise_type = std::conditional_t<
             std::is_same_v<
@@ -660,7 +676,10 @@ int main()
 
         int a_val = 0;
 
-        a.set_continuation([&a_val] (int v) { a_val = v; }); 
+        a.set_continuation(
+            std2::default_executor{}
+          , [&a_val] (int v) { a_val = v; }
+        ); 
 
         BOOST_TEST_EQ(a.value_ready(),        true);
         BOOST_TEST_EQ(a.continuation_ready(), true);
@@ -676,7 +695,10 @@ int main()
 
         int a_val = 0;
 
-        a.set_continuation([&a_val] (int v) { a_val = v; }); 
+        a.set_continuation(
+            std2::default_executor{}
+          , [&a_val] (int v) { a_val = v; }
+        ); 
 
         BOOST_TEST_EQ(a_val, 0);
 
@@ -716,14 +738,18 @@ int main()
             {
                 barrier();
 
-                a.set_value("foo");
+                a.set_value(
+                    "foo foo foo foo foo foo foo foo foo foo "
+                    "foo foo foo foo foo foo foo foo foo foo"
+                );
             }
         );
 
         barrier();        
 
         a.set_continuation(
-            [&] (std::string v)
+            std2::default_executor{}
+          , [&] (std::string v)
             {
                 a_val = v;
 
@@ -741,7 +767,11 @@ int main()
         BOOST_TEST_EQ(a.value_ready(),        true);
         BOOST_TEST_EQ(a.continuation_ready(), true);
 
-        BOOST_TEST_EQ(a_val, "foo");
+        BOOST_TEST_EQ(
+            a_val
+          , "foo foo foo foo foo foo foo foo foo foo "
+            "foo foo foo foo foo foo foo foo foo foo"
+        );
     }
 
     std::cout << "Consumer thread ran the continuation in "
