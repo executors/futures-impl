@@ -654,7 +654,7 @@ struct unique_future
                     p.set(std::apply(std::forward<F>(f), std::move(v)));
             }
         );
-        return g;
+        return std::move(g);
     } // }}}
 
     template <typename F>
