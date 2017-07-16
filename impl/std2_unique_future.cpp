@@ -7,6 +7,7 @@
 #include <iostream>
 #include <iomanip>
 #include <bitset>
+#include <variant>
 #include <optional>
 
 #include <cassert>
@@ -15,6 +16,47 @@
 
 namespace std2
 {
+
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
+  struct is_tuple                        { using type = std::false_type; };
+template <typename... Ts>
+  struct is_tuple<std::tuple<Ts...>>     { using type = std::true_type;  };
+template <typename T>
+  using is_tuple_t = typename is_tuple<T>::type;
+template <typename T>
+  inline bool constexpr is_tuple_v = is_tuple_t<T>::value;
+
+template <typename T>
+  struct is_variant                      { using type = std::false_type; };
+template <typename... Ts>
+  struct is_variant<std::variant<Ts...>> { using type = std::true_type;  };
+template <typename T>
+  using is_variant_t = typename is_variant<T>::type;
+template <typename T>
+  inline bool constexpr is_variant_v = is_variant_t<T>::value;
+
+///////////////////////////////////////////////////////////////////////////////
+
+struct rvoid
+{
+  constexpr rvoid() noexcept = default;
+  constexpr rvoid(rvoid const&) noexcept = default;
+  constexpr rvoid& operator= (rvoid const&) = default;
+
+  template <typename T>
+  explicit constexpr rvoid(T&&) noexcept {}
+};
+
+constexpr bool operator ==(rvoid, rvoid) noexcept { return true;  }
+constexpr bool operator !=(rvoid, rvoid) noexcept { return false; }
+constexpr bool operator < (rvoid, rvoid) noexcept { return false; }
+constexpr bool operator <=(rvoid, rvoid) noexcept { return true;  }
+constexpr bool operator >=(rvoid, rvoid) noexcept { return true;  }
+constexpr bool operator > (rvoid, rvoid) noexcept { return false; }
+
+///////////////////////////////////////////////////////////////////////////////
 
 template <typename Sig>
 struct fire_once;
@@ -107,6 +149,8 @@ struct fire_once<R(Args...)>
     } // }}}
 };
 
+///////////////////////////////////////////////////////////////////////////////
+
 struct semaphore
 {
     semaphore()
@@ -153,6 +197,8 @@ struct semaphore
     std::condition_variable  condition;
     std::atomic<std::size_t> count;
 };
+
+///////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
 struct asynchronous_value
@@ -464,11 +510,17 @@ struct asynchronous_value
     } // }}}
 };
 
-template <typename... Ts>
-struct unique_future;
+///////////////////////////////////////////////////////////////////////////////
 
-template <typename... Ts>
-struct unique_promise;
+struct default_executor;
+
+template <typename T, typename Executor = default_executor>
+struct basic_unique_future;
+
+template <typename T>
+struct basic_unique_promise;
+
+///////////////////////////////////////////////////////////////////////////////
 
 struct default_executor
 {
@@ -480,14 +532,14 @@ struct default_executor
 
     template <typename F, typename... Args>
     auto async(F&& f, Args&&... args)
-        -> unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
+        -> basic_unique_future<decltype(std::declval<F>(std::declval<Args>(args)...))>
     { // {{{
         using promise_type = std::conditional_t<
             std::is_same_v<
                 decltype(std::declval<F>()(std::declval<Args>()...)), void
             >
-          , unique_promise<>
-          , unique_promise<decltype(std::declval<F>()(std::declval<Args>()...))>
+          , basic_unique_promise<void>
+          , basic_unique_promise<decltype(std::declval<F>()(std::declval<Args>()...))>
         >;
         promise_type p;
         auto g = p.get_future();
@@ -497,29 +549,29 @@ struct default_executor
             , p = std::move(p)]
             () mutable
             {
-                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
+                if constexpr (std::is_same_v<promise_type, basic_unique_promise<void>>)
                 {
-                    std::apply(f, std::move(args));
+                    std::apply(std::move(f), std::move(args));
                     p.set();
                 }
                 else
-                    p.set(std::apply(std::forward<F>(f), std::move(args)));
+                    p.set(std::apply(std::move(f), std::move(args)));
             }
         );
         return g;
     } // }}}
 
-    template <typename... Ts>
-    auto depend(unique_future<Ts...> f)
+    template <typename T, typename Executor>
+    auto depend(basic_unique_future<T, Executor> f)
     { // {{{
         semaphore sem;
 
-        std::optional<std::tuple<Ts...>> v;
+        std::optional<T> v;
 
         f.then(
-            [&] (auto&&... args)
+            [&] (auto&& arg)
             {
-                v = std::make_tuple(std::forward<decltype(args)>(args)...);
+                v = std::forward<decltype(arg)>(arg);
                 sem.notify();
             }
         );
@@ -530,11 +582,19 @@ struct default_executor
     } // }}}
 };
 
-template <typename... Ts>
-struct unique_promise
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
+struct basic_unique_promise
 {
   private:
-    std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> data;
+    using data_type =  std::conditional_t<
+        std::is_same_v<T, void>
+      , asynchronous_value<rvoid>
+      , asynchronous_value<T>
+    >;
+
+    std::shared_ptr<data_type> data;
     bool future_retrieved; // If !data, this must be false.
 
     void deferred_data_allocation()
@@ -542,13 +602,13 @@ struct unique_promise
         if (!data)
         {
             assert(!future_retrieved);
-            data = std::make_shared<asynchronous_value<std::tuple<Ts...>>>();
+            data = std::make_shared<data_type>();
         }
     } // }}}
 
   public:
     // DefaultConstructible
-    constexpr unique_promise() noexcept
+    constexpr basic_unique_promise() noexcept
     // {{{
       : data{}
       , future_retrieved{}
@@ -556,12 +616,12 @@ struct unique_promise
     // }}}
 
     // MoveAssignable 
-    constexpr unique_promise(unique_promise&&) noexcept = default;
-    constexpr unique_promise& operator=(unique_promise&&) noexcept = default;
+    constexpr basic_unique_promise(basic_unique_promise&&) noexcept = default;
+    constexpr basic_unique_promise& operator=(basic_unique_promise&&) noexcept = default;
 
     // Not CopyAssignable
-    unique_promise(unique_promise const&) = delete;
-    unique_promise& operator=(unique_promise const&) = delete;
+    basic_unique_promise(basic_unique_promise const&) = delete;
+    basic_unique_promise& operator=(basic_unique_promise const&) = delete;
 
     bool ready() const
     { // {{{
@@ -570,48 +630,69 @@ struct unique_promise
         return false;
     } // }}}
 
-    unique_future<Ts...> get_future()
+    template <typename Executor>
+    basic_unique_future<T, Executor> get_future(Executor&& exec)
     { // {{{
         // Exits via error if the future has been retrieved.
         deferred_data_allocation();
         future_retrieved = true; 
-        return unique_future<Ts...>(data);
+        return basic_unique_future<T, Executor>(data, std::forward<Executor>(exec));
     } // }}}
 
-    template <typename... Us>
-    void set(Us&&... us)
+    basic_unique_future<T, default_executor> get_future()
+    { // {{{
+        return get_future(default_executor{});
+    } // }}}
+
+    template <typename U>
+    void set(U&& u)
     { // {{{
         deferred_data_allocation();
-        data->set_value(std::tuple<Ts...>(std::forward<Us>(us)...));
+        data->set_value(std::forward<U>(u));
     } // }}}
 };
 
-template <typename... Ts>
-struct unique_future
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T, typename Executor>
+struct basic_unique_future
 {
-    std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> data;
+  private:
+    using data_type =  std::conditional_t<
+        std::is_same_v<T, void>
+      , asynchronous_value<rvoid>
+      , asynchronous_value<T>
+    >;
+
+    std::shared_ptr<data_type> data;
+    Executor exec;
 
   private:
-    unique_future(std::shared_ptr<asynchronous_value<std::tuple<Ts...>>> ptr)
+    template <typename UExecutor>
+    basic_unique_future(
+        std::shared_ptr<data_type> ptr
+      , UExecutor&& uexec
+        )
     // {{{
       : data(ptr)
+      , exec(std::forward<UExecutor>(uexec))
     {}
     // }}}
 
-    friend class unique_promise<Ts...>;
+    friend class basic_unique_promise<T>;
 
   public:
 
     // DefaultConstructible
-    constexpr unique_future() noexcept = default;
+    constexpr basic_unique_future() noexcept = default;
 
     // MoveAssignable 
-    constexpr unique_future(unique_future&&) noexcept = default;
-    constexpr unique_future& operator=(unique_future&&) noexcept = default;
+    constexpr basic_unique_future(basic_unique_future&&) noexcept = default;
+    constexpr basic_unique_future& operator=(basic_unique_future&&) noexcept = default;
 
     // Not CopyAssignable
-    unique_future(unique_future const&) = delete;
-    unique_future& operator=(unique_future const&) = delete;
+    basic_unique_future(basic_unique_future const&) = delete;
+    basic_unique_future& operator=(basic_unique_future const&) = delete;
 
     bool ready() const
     { // {{{
@@ -620,38 +701,53 @@ struct unique_future
         return false;
     } // }}}
 
-    template <typename Executor, typename F>
-    // {{{ unique_future<...>
+    template <typename UExecutor, typename F>
+    // {{{ basic_unique_future<...>
     std::conditional_t<
-        std::is_same_v<decltype(std::declval<F>()(std::declval<Ts>()...)), void>
-      , unique_future<>
-      , unique_future<decltype(std::declval<F>()(std::declval<Ts>()...))>
+        std::is_same_v<decltype(std::declval<F>()(std::declval<T>())), void>
+      , basic_unique_future<void>
+      , basic_unique_future<decltype(std::declval<F>()(std::declval<T>()))>
     >
     // }}}
-    then(Executor&& exec, F&& f)
+    then(UExecutor&& uexec, F&& f)
     { // {{{
         using promise_type = std::conditional_t<
             std::is_same_v<
-                decltype(std::declval<F>()(std::declval<Ts>()...)), void
+                decltype(std::declval<F>()(std::declval<T>())), void
             >
-          , unique_promise<>
-          , unique_promise<decltype(std::declval<F>()(std::declval<Ts>()...))>
+          , basic_unique_promise<void>
+          , basic_unique_promise<decltype(std::declval<F>()(std::declval<T>()))>
         >;
         assert(data);
         promise_type p;
         auto g = p.get_future();
         data->set_continuation(
-            std::forward<Executor>(exec)
+            std::forward<Executor>(uexec)
           , [f = std::forward<F>(f), p = std::move(p)] 
-            (std::tuple<Ts...> v) mutable
+            (T v) mutable
             {
-                if constexpr (std::is_same_v<promise_type, unique_promise<>>)
+                // If the continuation returns void.
+                if constexpr (std::is_same_v<promise_type, basic_unique_promise<void>>)
                 {
-                    std::apply(f, std::move(v));
-                    p.set();
+                    if constexpr      (is_tuple_v<T>)
+                        std::apply(std::move(f), std::move(v));
+                    else if constexpr (is_variant_v<T>)
+                        std::visit(std::move(f), std::move(v));
+                    else
+                        std::invoke(std::move(f), std::move(v));
+
+                    p.set(rvoid{});
                 }
+                // If the continuation returns non-void.
                 else
-                    p.set(std::apply(std::forward<F>(f), std::move(v)));
+                {
+                    if constexpr      (is_tuple_v<T>)
+                        p.set(std::apply(std::move(f), std::move(v)));
+                    else if constexpr (is_variant_v<T>)
+                        p.set(std::visit(std::move(f), std::move(v)));
+                    else
+                        p.set(std::invoke(std::move(f), std::move(v)));
+                }
             }
         );
         return std::move(g);
@@ -660,10 +756,10 @@ struct unique_future
     template <typename F>
     auto then(F&& f)
     { // {{{
-        return then(default_executor{}, std::forward<F>(f));
+        return then(exec, std::forward<F>(f));
     } // }}}
 
-    std::optional<std::tuple<Ts...>> try_get()
+    std::optional<T> try_get()
     { // {{{
         if (data)
             return data->try_get();
@@ -671,19 +767,21 @@ struct unique_future
             return {};
     } // }}}
 
-    template <typename Executor>
-    std::tuple<Ts...> get(Executor&& exec)
+    template <typename UExecutor>
+    T get(UExecutor&& uexec)
     { // {{{
-        return std::forward<Executor>(exec).depend(std::move(*this));
+        return std::forward<UExecutor>(uexec).depend(std::move(*this));
     } // }}}
 
-    std::tuple<Ts...> get() 
+    T get() 
     { // {{{
-        return get(default_executor{}); 
+        return get(exec); 
     } // }}}
 };
 
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 int main()
 {
@@ -816,11 +914,11 @@ int main()
     }
 
     { // Set value, then set continuation.
-        std2::unique_promise<int> p;
+        std2::basic_unique_promise<int> p;
 
         p.set(42);
 
-        std2::unique_future<int> f = p.get_future();
+        std2::basic_unique_future<int> f = p.get_future();
 
         int a_val = 0;
         f.then([&a_val] (int v) { a_val = v; }); 
@@ -829,9 +927,9 @@ int main()
     }
 
     { // Set continuation, then set value.
-        std2::unique_promise<int> p;
+        std2::basic_unique_promise<int> p;
 
-        std2::unique_future<int> f = p.get_future();
+        std2::basic_unique_future<int> f = p.get_future();
 
         int a_val = 0;
         f.then([&a_val] (int v) { a_val = v; }); 
@@ -844,19 +942,19 @@ int main()
     }
 
     { // Set value, then set continuation.
-        std2::unique_promise<int> p;
+        std2::basic_unique_promise<int> p;
 
         p.set(42);
 
-        auto [a_val] = (*p.get_future().try_get());
+        int const a_val = (*p.get_future().try_get());
 
         BOOST_TEST_EQ(a_val, 42);
     }
 
     { // Set continuation, then set value.
-        std2::unique_promise<int> p;
+        std2::basic_unique_promise<int> p;
 
-        std2::unique_future<int> f = p.get_future();
+        std2::basic_unique_future<int> f = p.get_future();
 
         std::optional<std::tuple<int>> maybe_a_val = f.try_get();
 
@@ -864,7 +962,7 @@ int main()
 
         p.set(42);
 
-        auto [a_val] = (*p.get_future().try_get());
+        int const a_val = (*p.get_future().try_get());
 
         BOOST_TEST_EQ(a_val, 42);
     }
@@ -878,9 +976,9 @@ int main()
             ; ++i
             )
         {
-            std2::unique_promise<std::string> p;
+            std2::basic_unique_promise<std::string> p;
 
-            std2::unique_future<std::string> f = p.get_future();
+            std2::basic_unique_future<std::string> f = p.get_future();
 
             std::atomic<int> go_flag(false);
 
@@ -915,7 +1013,7 @@ int main()
             else
                 ++consumer_count;
 
-            auto [a_val] = f.get();
+            std::string const a_val = f.get();
 
             BOOST_TEST_EQ(f.ready(), false);
 
