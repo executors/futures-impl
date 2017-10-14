@@ -103,9 +103,9 @@ int b = f.get();
 
 The answer is undefined behavior. Today:
 
-* [libc++ seg faults.](https://wandbox.org/permlink/1jlH8hMtU3npBOIZ).
-* [libstdc++ throws an exception.](https://wandbox.org/permlink/UeMDUvDaOl4ZFI8l).
-* [Boost prints "hello" and then "" (non-conforming).](https://wandbox.org/permlink/BrZs8TniwcjxXn3P).
+* [libc++ seg faults.](https://wandbox.org/permlink/1jlH8hMtU3npBOIZ)
+* [libstdc++ throws an exception.](https://wandbox.org/permlink/UeMDUvDaOl4ZFI8l)
+* [Boost prints "hello" and then "" (non-conforming).](https://wandbox.org/permlink/BrZs8TniwcjxXn3P)
 
 While I do find undefined behavior and the implementation divergence that stems
   from it troubling, I think there's a bigger problem.
