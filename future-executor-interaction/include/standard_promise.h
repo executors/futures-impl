@@ -22,6 +22,16 @@ public:
     return standard_semi_future<T>(core_);
   }
 
+  // Specialised functionality for standard_future not in future concept
+  // because it is valid to associate the standard future with any executor
+  // type while standard_semi_future::via(ex) will convert to the executor's
+  // future type.
+  template<class Executor>
+  standard_future<T, Executor> get_future(Executor&& ex) {
+    return standard_future<T, std::decay_t<Executor>>{
+      core_, std::forward<Executor>(ex)};
+  }
+
   void set_value(T&& value) {
     core_->set_value(std::move(value));
   }

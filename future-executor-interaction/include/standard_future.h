@@ -26,6 +26,11 @@ struct unary_function {
 
 template<class T, class Executor>
 class standard_future{
+private:
+  struct HelperF {
+    T operator()(T val) { return val; }
+  };
+
 public:
   using value_type = T;
   using executor_type = Executor;
@@ -109,8 +114,33 @@ public:
       std::declval<F>(),
       std::move(*this)));
 
+  // Allow via to extract future type from then_executor
+  //
+  // If the executors are the same, the future type will not change so there
+  // is no need to enqueue the cost (and recursion risk) of calling then
+  // under the hood.
+  // If the executor is one-way, then the future type cannot change.
   template<class NextExecutor>
-  auto via(NextExecutor exec) && -> standard_future<T, NextExecutor>;
+  auto via(
+    NextExecutor&& exec,
+    typename enable_if<
+        experimental::execution::is_oneway_executor_v<NextExecutor> &&
+        !experimental::execution::is_then_executor_v<NextExecutor>>::type* = 0
+    ) && -> standard_future<T, NextExecutor>;
+
+  // Allow via to extract future type from then_executor
+  //
+  // If the executor types are different and the executor is a then_executor,
+  // the future type might change.
+  template<class NextExecutor>
+  auto via(
+    NextExecutor&& exec,
+    typename enable_if<
+        experimental::execution::is_then_executor_v<NextExecutor>>::type* = 0,
+      int a = 0) &&
+      -> decltype(std::declval<std::decay_t<NextExecutor>>().then_execute(
+        std::declval<HelperF>(),
+        std::move(*this)));
 
   // Should be called only by executor implementations
   // Callback should perform only trivial work to let the executor know
@@ -135,6 +165,11 @@ private:
       core_{std::move(core)},
       executor_{std::move(ex)} {
   }
+
+
+
+
+
 
   std::shared_ptr<detail::promise_shared_state<T>> core_;
   Executor executor_;

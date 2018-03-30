@@ -9,19 +9,71 @@ namespace std {
 namespace experimental {
 inline namespace futures_v1 {
 
+// Specialised on oneway executor.
+// This just modifies the standard_future to carry the new executor without
+// making use of any special knowledge the executor may have.
 template<class T>
-template<class Executor>
-standard_future<T, Executor> standard_semi_future<T>::via(Executor&& exec) && {
-  return standard_future<T, Executor>{
-    std::move(core_), std::forward<Executor>(exec)};
+template<class NextExecutor>
+auto standard_semi_future<T>::via(
+    NextExecutor&& exec, typename enable_if<
+        experimental::execution::is_oneway_executor_v<NextExecutor> &&
+        !experimental::execution::is_then_executor_v<NextExecutor>>::type*) &&
+        -> standard_future<T, NextExecutor>{
+
+  return standard_future<T, NextExecutor>{
+    std::move(this->core_), std::forward<NextExecutor>(exec)};
 }
 
+// Specialised on then_executor.
+// This ensures that the returned future is specialised for the executor with
+// any necessary synchronization primitives it is aware of.
+template<class T>
+template<class NextExecutor>
+auto standard_semi_future<T>::via(
+    NextExecutor&& exec, typename enable_if<
+        experimental::execution::is_then_executor_v<NextExecutor>>::type*, int /*unused*/) &&
+        -> decltype(std::declval<std::decay_t<NextExecutor>>().then_execute(
+          std::declval<HelperF>(),
+          std::move(*this))){
+
+  return standard_future<T, NextExecutor>{
+    std::move(this->core_), std::forward<NextExecutor>(exec)}.then(
+      HelperF{});
+}
+
+
+// Specialised on oneway executor.
+// This just modifies the standard_future to carry the new executor without
+// making use of any special knowledge the executor may have.
 template<class T, class Executor>
 template<class NextExecutor>
 auto standard_future<T, Executor>::via(
-    NextExecutor exec) && -> standard_future<T, NextExecutor>{
+    NextExecutor&& exec, typename enable_if<
+        experimental::execution::is_oneway_executor_v<NextExecutor> &&
+        !experimental::execution::is_then_executor_v<NextExecutor>>::type*) &&
+        -> standard_future<T, NextExecutor>{
+
   return standard_future<T, NextExecutor>{
-    std::move(core_), std::move(exec)};
+    std::move(this->core_), std::forward<NextExecutor>(exec)};
+}
+
+// Specialised on then_executor.
+// This ensures that the returned future is specialised for the executor with
+// any necessary synchronization primitives it is aware of.
+template<class T, class Executor>
+template<class NextExecutor>
+auto standard_future<T, Executor>::via(
+    NextExecutor&& exec,
+    typename enable_if<
+        experimental::execution::is_then_executor_v<NextExecutor>>::type*,
+    int /*unused*/) &&
+        -> decltype(std::declval<std::decay_t<NextExecutor>>().then_execute(
+          std::declval<HelperF>(),
+          std::move(*this))){
+
+  return standard_future<T, NextExecutor>{
+    std::move(this->core_), std::forward<NextExecutor>(exec)}.then(
+      HelperF{});
 }
 
 template<class T, class Executor>

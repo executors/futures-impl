@@ -41,8 +41,10 @@ public:
     std::experimental::standard_promise<
       std::result_of_t<Function(std::decay_t<typename Future::value_type>&&)>>
         chainedPromise;
-    auto returnFuture = chainedPromise.get_semi_future().via(
-        simple_then_executor{});
+        
+    // Get future directly because we know this future has that functionality
+    // and to call .via would be recursive on this function
+    auto returnFuture = chainedPromise.get_future(simple_then_executor{});
 
     // Then construct a completion token to perform the trivial enqueue action
     // which is all this particular executor type needs as it does not carry
@@ -91,6 +93,7 @@ public:
       const stateful_then_executor& lhs, const stateful_then_executor& rhs) noexcept {
     return !(lhs==rhs);
   }
+  // Overload for when future types match
   template<class Function, class Future>
   auto then_execute(Function func, Future fut) const noexcept
       -> std::experimental::standard_future<
@@ -98,12 +101,14 @@ public:
     execution::future_completion_token<
       std::decay_t<typename Future::value_type>> token;
 
-    // Chain by cosntructing new promise/future pair
+    // Chain by constructing new promise/future pair
     std::experimental::standard_promise<
       std::result_of_t<Function(std::decay_t<typename Future::value_type>&&)>>
         chainedPromise;
-    auto returnFuture = chainedPromise.get_semi_future().via(
-        stateful_then_executor{});
+
+    // Get future directly because we know this future has that functionality
+    // and to call .via would be recursive on this function
+    auto returnFuture = chainedPromise.get_future(stateful_then_executor{});
 
     // Acquire lock and setup map state, task and completion token
     {
@@ -180,6 +185,22 @@ private:
 
   std::shared_ptr<stateful_then_executor_impl> impl_;
 };
+
+
+namespace std {
+namespace experimental {
+namespace execution {
+template<class T>
+struct executor_future<simple_then_executor, T> {
+  using type = std::experimental::standard_future<T, simple_then_executor>;
+};
+template<class T>
+struct executor_future<stateful_then_executor, T> {
+  using type = std::experimental::standard_future<T, stateful_then_executor>;
+};
+} // execution
+} // experimental
+} // std
 
 
 int main() {
