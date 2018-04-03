@@ -41,7 +41,7 @@ public:
     std::experimental::standard_promise<
       std::result_of_t<Function(std::decay_t<typename Future::value_type>&&)>>
         chainedPromise;
-        
+
     // Get future directly because we know this future has that functionality
     // and to call .via would be recursive on this function
     auto returnFuture = chainedPromise.get_future(simple_then_executor{});
@@ -75,6 +75,112 @@ public:
   constexpr bool query(execution::then_t) { return true; }
   constexpr bool query(execution::single_t) { return true; }
 };
+
+
+struct simple_then_executor_with_promise
+{
+public:
+
+  // Local future and promise type
+  // as example, these are used in a specific way by standard_future's
+  // via_with_executor_promise.
+  // In production code they should be strengthened but the point is to
+  // demonstrate that these are not intended to be entirely general future/
+  // promise pairs
+  template<class T>
+  struct LittleSharedState {
+    std::function<void(T&&)> func;
+  };
+  template<class T>
+  struct LocalFuture {
+    std::shared_ptr<LittleSharedState<T>> state;
+  };
+  template<class T>
+  struct Promise {
+    Promise(){
+      state = std::make_shared<LittleSharedState<T>>();
+    }
+    void set_value(T&& val) {
+      // Don't do mutex because this future/promise pair is used in a single
+      // use case
+      auto f = std::move(state->func);
+      f(std::move(val));
+    }
+
+    LocalFuture<T> get_future() {
+      return LocalFuture<T>{state};
+    }
+
+    std::shared_ptr<LittleSharedState<T>> state;
+  };
+
+  template<class T>
+  Promise<T> get_promise() {
+    // In general could add shared state here, GPU queue details
+    return Promise<T>{};
+  }
+
+  friend bool operator==(
+      const simple_then_executor_with_promise&, const simple_then_executor_with_promise&) noexcept {
+    return true;
+  }
+  friend bool operator!=(
+      const simple_then_executor_with_promise&, const simple_then_executor_with_promise&) noexcept {
+    return false;
+  }
+
+  // General version for any future type
+  // Only implemented to satisfy type trait for now
+  template<class Function, class Future>
+  auto then_execute(Function /*func*/, Future /*fut*/) const noexcept
+      -> std::experimental::standard_future<
+          std::result_of_t<Function(std::decay_t<typename Future::value_type>&&)>, simple_then_executor_with_promise> {
+    throw std::logic_error("Not used");
+  }
+
+  // Specialised version for internal future type
+  template<class Function, class T>
+  auto then_execute(Function func, LocalFuture<T> fut) const noexcept
+      -> std::experimental::standard_future<
+          std::result_of_t<Function(T&&)>, simple_then_executor_with_promise> {
+
+    // Chain by cosntructing new promise/future pair
+    std::experimental::standard_promise<
+      std::result_of_t<Function(T&&)>>
+        chainedPromise;
+
+    // Get future directly because we know this future has that functionality
+    // and to call .via would be recursive on this function
+    auto returnFuture = chainedPromise.get_future(simple_then_executor_with_promise{});
+
+    // Then construct a completion token to perform the trivial enqueue action
+    // which is all this particular executor type needs as it does not carry
+    // chaining state.
+    std::function<void(T&&)> contFunc = [promise = std::move(chainedPromise),
+       func = std::move(func)](T&& val) mutable {
+        // Completion token performs a trivial action on the source future's
+        // executor.
+        // Usually an operation that amounts to triggering execution of the
+        // actual completion task on the next executor.
+        // As for this executor completion is via a promise/future pair
+        // we simulate this by creating a trivial inline_executor to run it on
+        inline_executor{}.execute(
+          [   promise = std::move(promise),
+              val = std::move(val),
+              func = std::move(func)]() mutable {
+            promise.set_value(func(std::move(val)));
+          });
+      };
+
+    fut.state->func = std::move(contFunc);
+    return returnFuture;
+  }
+  constexpr bool query(execution::oneway_t) { return false; }
+  constexpr bool query(execution::twoway_t) { return false; }
+  constexpr bool query(execution::then_t) { return true; }
+  constexpr bool query(execution::single_t) { return true; }
+};
+
 
 struct stateful_then_executor
 {
@@ -187,6 +293,7 @@ private:
 };
 
 
+
 namespace std {
 namespace experimental {
 namespace execution {
@@ -246,7 +353,7 @@ int main() {
   }
   {
     const std::string TESTNAME =
-      "Simple via then and get with statful then_executor";
+      "Simple via then and get with stateful then_executor";
     const int EXPECTED = 12;
 
     std::experimental::standard_promise<int> promise;
@@ -259,6 +366,32 @@ int main() {
 
     std::thread setter{[&promise](){
       promise.set_value(9);
+    }};
+
+    auto result = f.get();
+    setter.join();
+    std::cerr << TESTNAME << "\t" << check(result, EXPECTED) << "\n";
+  }
+
+  // Use then_executor with promise.
+  // This should the alternative construction that does not rely on a public
+  // set_callback on the future
+  {
+    const std::string TESTNAME =
+      "Simple via then and get with simple_then_executor_with_promise";
+    const int EXPECTED = 3;
+
+    std::experimental::standard_promise<int> promise;
+
+    // Do via and get
+    // This is only for demonstration - to add continuations too we'd want
+    // to also special case the executor to have its own future type or it
+    // will always have to do then_execute with special chaining.
+    auto f =
+      promise.get_semi_future().via_with_executor_promise(simple_then_executor_with_promise{});
+
+    std::thread setter{[&promise](){
+      promise.set_value(3);
     }};
 
     auto result = f.get();

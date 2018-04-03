@@ -41,6 +41,25 @@ auto standard_semi_future<T>::via(
       HelperF{});
 }
 
+template<class T>
+template<class NextExecutor>
+auto standard_semi_future<T>::via_with_executor_promise(
+    NextExecutor&& exec,
+    typename enable_if<
+        experimental::execution::is_then_executor_v<NextExecutor>>::type*,
+    int /*unused*/) &&
+        -> decltype(std::declval<std::decay_t<NextExecutor>>().then_execute(
+          std::declval<HelperF>(),
+          std::declval<typename NextExecutor::template Promise<T>>().get_future())) {
+
+  // Get promise/future pair and use that with then_execute for chaining
+  auto p = exec.template get_promise<T>();
+  auto f = p.get_future();
+  auto retFuture = exec.then_execute([](auto&& val){return std::move(val);}, f);
+  core_->set_task([p = std::move(p)](auto&& val) mutable {p.set_value(std::move(val));});
+  return retFuture;
+}
+
 
 // Specialised on oneway executor.
 // This just modifies the standard_future to carry the new executor without

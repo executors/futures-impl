@@ -113,6 +113,21 @@ public:
         std::declval<HelperF>(),
         std::move(*this)));
 
+  // Allow via to extract future type from then_executor
+  //
+  // If the executor types are different and the executor is a then_executor,
+  // the future type might change.
+  // Version of via that uses an executor with attached promise
+  template<class NextExecutor>
+  auto via_with_executor_promise(
+    NextExecutor&& exec,
+    typename enable_if<
+        experimental::execution::is_then_executor_v<NextExecutor>>::type* = 0,
+      int a = 0) &&
+      -> decltype(std::declval<std::decay_t<NextExecutor>>().then_execute(
+        std::declval<HelperF>(),
+        std::declval<typename NextExecutor::template Promise<T>>().get_future()));
+
 
   // Should be called only by executor implementations
   // Callback should perform only trivial work to let the executor know
