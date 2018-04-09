@@ -110,14 +110,14 @@ struct cuda_free_deleter final
 template <typename T>
 using cuda_unique_ptr = std::unique_ptr<T, cuda_free_deleter<T> >;
 
-template <typename F, typename R, typename T>
+template <typename F, typename T, typename U>
 __global__
-void continuation_kernel(F f, R* r, T* t)
+void continuation_kernel(F f, T* t, U* u)
 { // {{{
   // Consume the value from our dependency by moving it out of it's
   // `asynchronous_value`. The storage for said value will not be destroyed
   // until our `asynchronous_value` is destroyed.
-  *r = f(static_cast<typename std::remove_reference<T>::type&&>(*t));
+  *t = f(static_cast<typename std::remove_reference<U>::type&&>(*u));
 } // }}}
 
 template <typename T>
@@ -141,6 +141,7 @@ public:
     , stream{}
     , value{}
     , event_recorded(false)
+    , value_consumed(false)
   {
     CUevent_st* e;
     THROW_ON_CUDA_ERROR(cudaEventCreate(&e));
@@ -166,6 +167,7 @@ public:
     , stream{}
     , value{}
     , event_recorded(false)
+    , value_consumed(false)
   {
     T* p;
     THROW_ON_CUDA_ERROR(cudaMallocManaged(&p, sizeof(T)));
@@ -217,7 +219,7 @@ public:
   __host__
   bool consumed() const
   { // {{{
-    return !value;
+    return value_consumed;
   } // }}}
 
   template <typename U, typename F>
@@ -226,16 +228,24 @@ public:
   { // {{{
     static_assert(std::is_trivially_copyable<F>::value, "");
 
+    assert(!immediate());
     assert(!valid());
     assert(dep.valid() && !dep.consumed());
 
-    // Make our stream depend on the completion of `dep`'s event.
-    THROW_ON_CUDA_ERROR(cudaStreamWaitEvent(stream.get(), dep.event.get()));
+    if (!dep.immediate())
+      // If `dep` is not an immediate value, make our stream depend on the
+      // completion of `dep`'s event.
+      THROW_ON_CUDA_ERROR(cudaStreamWaitEvent(stream.get(), dep.event.get(), 0));
 
     // Launch a kernel that evaluates `f` on our stream.
-    void* args[] = { &f, value.get(), dep.value.get() };
-    THROW_ON_CUDA_ERROR(cudaLaunchKernel(continuation_kernel<F, T, U>,
+    T* t = value.get();
+    U* u = dep.value.get();
+    void* args[] = { &f, &t, &u };
+    void const* k = reinterpret_cast<void const*>(continuation_kernel<F, T, U>);
+    THROW_ON_CUDA_ERROR(cudaLaunchKernel(k,
                         dim3{1}, dim3{1}, args, 0, stream.get()));
+
+    THROW_ON_CUDA_ERROR(cudaDeviceSynchronize());
 
     // Mark `dep`'s value as consumed. Its storage will be freed later.
     dep.value_consumed = true;
@@ -250,7 +260,8 @@ public:
   { // {{{
     assert(valid());
 
-    THROW_ON_CUDA_ERROR(cudaEventSynchronize(event.get()));
+    if (!immediate())
+      THROW_ON_CUDA_ERROR(cudaEventSynchronize(event.get()));
   } // }}}
 
   __host__
@@ -258,8 +269,7 @@ public:
   { // {{{
     assert(valid() && !consumed());
 
-    if (!immediate())
-      wait();
+    wait();
 
     // Consume the value by moving it out of the storage.
     T tmp(std::move(*value));
@@ -309,5 +319,45 @@ int main()
     TEST_EQ(a.continuation_ready(), false);
     TEST_EQ(a.consumed(),           true);
   }
+
+  { // Create an immediate `asynchronous_value`, then attach a dependency to it.
+    asynchronous_value<int> a(42);
+
+    TEST_EQ(a.valid(),              true);
+    TEST_EQ(a.immediate(),          true);
+    TEST_EQ(a.value_ready(),        true);
+    TEST_EQ(a.continuation_ready(), false);
+    TEST_EQ(a.consumed(),           false);
+
+    asynchronous_value<int> b;
+
+    b.set_continuation(a, [] __device__ (int i) { return i + 17; });
+
+    TEST_EQ(a.valid(),              true);
+    TEST_EQ(a.immediate(),          true);
+    TEST_EQ(a.value_ready(),        true);
+    TEST_EQ(a.continuation_ready(), false);
+    TEST_EQ(a.consumed(),           true);
+
+    TEST_EQ(b.valid(),              true);
+    TEST_EQ(b.immediate(),          false);
+    // We don't test `b.value_ready()` here because the result is unspecified -
+    // the kernel may or may not have asynchronously launched and completed by
+    // now.
+    TEST_EQ(b.continuation_ready(), true);
+    TEST_EQ(b.consumed(),           false);
+
+    int b_val = b.get();
+
+    TEST_EQ(b_val,                  59);
+
+    TEST_EQ(b.valid(),              true);
+    TEST_EQ(b.immediate(),          false);
+    TEST_EQ(b.value_ready(),        true);
+    TEST_EQ(b.continuation_ready(), true);
+    TEST_EQ(b.consumed(),           true);
+  }
+
+  // TODO: Chaining different types.
 }
 
