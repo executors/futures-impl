@@ -1,0 +1,3 @@
+[submodule "archetypes/cuda_future/agency"]
+	path = archetypes/cuda_future/agency
+	url = git@github.com:agency-library/agency
