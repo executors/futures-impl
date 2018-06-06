@@ -7,11 +7,10 @@ else
 	FLAGS+=-O3 
 endif
 
-FLAGS+=-std=c++17
-NVCC_FLAGS+=-gencode arch=compute_61,\"code=sm_61\" -gencode arch=compute_61,\"code=compute_61\"
-CXX_LIBS=-lpthread
+CXX_FLAGS=-std=c++17 -pthread
+NVCC_FLAGS+=-std=c++14 --expt-extended-lambda -gencode arch=compute_61,\"code=sm_61\" -gencode arch=compute_61,\"code=compute_61\" -lcuda
 INCLUDES=-I.
-CU_SOURCES=$(shell ls -1 *.cpp)
+CU_SOURCES=$(shell ls -1 *.cu)
 CXX_SOURCES=$(shell ls -1 *.cpp)
 PROGRAMS=$(CXX_SOURCES:.cpp=) $(CU_SOURCES:.cu=)
 DIRECTORIES=build
@@ -25,7 +24,7 @@ $(DIRECTORIES)/:
 	mkdir -p $@ 
 
 % : %.cpp
-	$(CXX) $(FLAGS) $(CXX_LIBS) $(INCLUDES) $< -o build/$@
+	$(CXX) $(FLAGS) $(CXX_FLAGS) $(INCLUDES) $< -o build/$@
 	build/$@
 
 % : %.cu

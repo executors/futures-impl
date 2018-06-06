@@ -234,10 +234,10 @@ int main() {
 
   auto f = exec.twoway_execute([] { cout << "0" << endl; return 17; });
 
-  auto g = move(f).then([] (int v) { cout << v << endl; return 42; }); 
+  auto g = move(f).then([] (int v) { cout << v << endl; return 3.14; }); 
 
-  auto h = move(f).then([] (int v) { cout << v << endl; return 42; }); 
+  auto h = move(g).then([] (double v) { cout << v << endl; return 42; }); 
 
-  future_wait(move(g));
+  future_wait(move(h));
 }
 
