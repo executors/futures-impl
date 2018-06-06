@@ -10,13 +10,20 @@
 
 #include <cuda.h>
 
-struct cuda_rt_exception : std::exception
+using std::exception;
+using std::string;
+using std::unique_ptr;
+using std::shared_ptr;
+using std::atomic;
+using std::uint32_t;
+
+struct cuda_rt_exception : exception
 {
   cuda_rt_exception(cudaError_t error_, char const* message_)
   // {{{
     : error(error_)
     , message(
-        std::string(cudaGetErrorName(error_)) + ": "
+        string(cudaGetErrorName(error_)) + ": "
       + cudaGetErrorString(error_) + ": "
       + message_
       )
@@ -34,12 +41,11 @@ struct cuda_rt_exception : std::exception
   } // }}}
 
 private:
-
   cudaError_t error;
-  std::string message;
+  string message;
 };
 
-struct cuda_drv_exception : std::exception
+struct cuda_drv_exception : exception
 {
   cuda_drv_exception(CUresult error_, char const* message_)
   // {{{
@@ -69,7 +75,7 @@ struct cuda_drv_exception : std::exception
 private:
 
   CUresult error;
-  std::string message;
+  string message;
 };
 
 #if defined(__GNUC__) || (defined(__MWERKS__) && (__MWERKS__ >= 0x3000)) || (defined(__ICC) && (__ICC >= 600)) || defined(__ghs__)
@@ -118,6 +124,28 @@ struct cuda_stream_deleter final
   } // }}}
 };
 
+struct cuda_stream final {
+  cuda_stream() {
+    CUstream_st* s;
+    THROW_ON_CUDA_RT_ERROR(cudaStreamCreate(&s));
+    ptr.reset(s, cuda_stream_deleter{});
+  }
+
+  cuda_stream(cuda_stream const&) = default;
+  cuda_stream(cuda_stream&&) = default;
+
+  CUstream_st* operator->() const {
+    return ptr.get();
+  }
+
+  CUstream_st* get() const {
+    return ptr.get();
+  }
+
+private:
+  shared_ptr<CUstream_st> ptr;
+};
+
 template <typename T>
 struct cuda_free_deleter final
 {
@@ -141,10 +169,50 @@ struct cuda_free_host_deleter final
     if (nullptr != p)
     {
       p->~T();
-      THROW_ON_CUDA_RT_ERROR(cudaFreeHost(p));
+      THROW_ON_CUDA_RT_ERROR(cudaFreeHost((void*)(p)));
     }
   } // }}}
 };
+
+template <typename T>
+struct cuda_host_pinned_unique_ptr final {
+  cuda_host_pinned_unique_ptr() {
+    T* r;
+    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&r, sizeof(T), 0));
+    new (const_cast<std::remove_cv_t<T>*>(r)) T;
+    ptr.reset(r);
+  }
+
+  cuda_host_pinned_unique_ptr(T&& t) {
+    T* r;
+    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&r, sizeof(T), 0));
+    new (const_cast<std::remove_cv_t<T>*>(r)) T(move(t));
+    ptr.reset(r);
+  }
+
+  cuda_host_pinned_unique_ptr(T const& t) {
+    T* r;
+    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&r, sizeof(T), 0));
+    new (const_cast<std::remove_cv_t<T>*>(r)) T(t);
+    ptr.reset(r);
+  }
+
+  cuda_host_pinned_unique_ptr(cuda_host_pinned_unique_ptr const&) = default;
+  cuda_host_pinned_unique_ptr(cuda_host_pinned_unique_ptr&&) = default;
+
+  T* operator->() const {
+    return ptr.get();
+  }
+
+  T* get() const {
+    return ptr.get();
+  }
+
+private:
+  unique_ptr<T, cuda_free_host_deleter<T>> ptr;
+};
+
+///////////////////////////////////////////////////////////////////////////////
 
 struct share_stream_t final {};
 
@@ -153,6 +221,39 @@ share_stream_t share_stream{};
 struct not_ready_t final {};
 
 not_ready_t not_ready{};
+
+template <typename T>
+struct shared_state final
+{ // {{{
+  int device;
+  cuda_stream stream;
+  cuda_host_pinned_unique_ptr<atomic<uint32_t> volatile> ready;
+  unique_ptr<T, cuda_free_deleter<T>> value;
+
+  shared_state()
+    : stream()
+    , ready(0)
+  { // {{{
+    THROW_ON_CUDA_RT_ERROR(cudaGetDevice(&device));
+
+    T* v;
+    THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
+    new (v) T;
+    value.reset(v);
+  } // }}}
+
+  shared_state(share_stream_t, shared_state const& other)
+    : stream(other.stream)
+    , ready(0)
+  { // {{{
+    THROW_ON_CUDA_RT_ERROR(cudaGetDevice(&device));
+
+    T* v;
+    THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
+    new (v) T;
+    value.reset(v);
+  } // }}}
+}; // }}}
 
 template <typename Continuation, typename U, typename T>
 __global__
@@ -165,50 +266,6 @@ struct cuda_executor final
 {
   template <typename T>
   struct future;
-
-  template <typename T>
-  struct shared_state final
-  { // {{{
-    int device;
-    std::shared_ptr<CUstream_st> stream;
-    std::unique_ptr<std::atomic<std::uint32_t>, cuda_free_host_deleter<std::atomic<std::uint32_t>>> ready;
-    std::unique_ptr<T, cuda_free_deleter<T>> value;
-
-    shared_state()
-    { // {{{
-      THROW_ON_CUDA_RT_ERROR(cudaGetDevice(&device));
-
-      CUstream_st* s;
-      THROW_ON_CUDA_RT_ERROR(cudaStreamCreate(&s));
-      stream.reset(s, cuda_stream_deleter{});
-
-      std::atomic<std::uint32_t>* r;
-      THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&r, sizeof(std::atomic<std::uint32_t>), 0));
-      new (r) std::atomic<std::uint32_t>(0);
-      ready.reset(r);
-
-      T* v;
-      THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
-      new (v) T;
-      value.reset(v);
-    } // }}}
-
-    shared_state(share_stream_t, shared_state const& other)
-      : stream(other.stream)
-    { // {{{
-      THROW_ON_CUDA_RT_ERROR(cudaGetDevice(&device));
-
-      std::atomic<std::uint32_t>* r;
-      THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&r, sizeof(std::atomic<std::uint32_t>), 0));
-      new (r) std::atomic<std::uint32_t>(0);
-      ready.reset(r);
-
-      T* v;
-      THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
-      new (v) T;
-      value.reset(v);
-    } // }}}
-  }; // }}}
 
   template <typename T>
   struct promise final
