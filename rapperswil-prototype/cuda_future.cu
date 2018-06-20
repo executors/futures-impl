@@ -24,23 +24,9 @@ struct cuda_executor;
 
 template <typename Operation>
 __global__
-void kernel0(Operation op)
+void launch_impl(Operation op)
 { 
-  op();
-}
-
-template <typename Operation, typename U>
-__global__
-void kernel0_with_return(Operation op, U* u)
-{ 
-  *u = op();
-}
-
-template <typename Operation, typename U, typename T>
-__global__
-void kernel1_with_return(Operation op, U* u, T* t)
-{ 
-  *u = op(MV(*t));
+  MV(op)();
 }
 
 struct cuda_executor final
@@ -51,11 +37,19 @@ struct cuda_executor final
   template <typename T>
   using promise = cuda_executor_promise<T>;
 
+private: 
+  template <typename Operation>
+  void launch(Operation&& op, cudaStream_t stream)
+  {
+    launch_impl<<<1, 1, 0, stream>>>(op);
+    THROW_ON_CUDA_RT_ERROR(cudaGetLastError());
+  }
+
+public:
   template <typename Operation>
   void execute(Operation&& op)
   {
-    kernel0<<<1, 1, 0, nullptr>>>(op);
-    THROW_ON_CUDA_RT_ERROR(cudaGetLastError());
+    launch(FWD(op), nullptr);
   }
 
   template <typename Operation>
@@ -68,8 +62,9 @@ struct cuda_executor final
     auto ss = std::make_shared<cuda_async_value<U>>();
     cuda_executor_future<U, cuda_executor> f(ss, *this);
 
-    kernel0_with_return<<<1, 1, 0, ss->stream()>>>(op, ss->data());
-    THROW_ON_CUDA_RT_ERROR(cudaGetLastError());
+    auto data = ss->data();
+
+    launch([=] __device__ { *data = op(); }, ss->stream());
 
     return MV(f); 
   }
@@ -95,7 +90,10 @@ struct cuda_executor final
     cuda_executor_future<U, cuda_executor> g(MV(ss), MV(f).executor());
 
     auto const& gss = g.shared_state();
-    kernel1_with_return<<<1, 1, 0, gss->stream()>>>(FWD(op), gss->data(), fdata);
+
+    auto gdata = gss->data();
+
+    launch([=] __device__ { *gdata = op(*fdata); }, gss->stream());
     THROW_ON_CUDA_RT_ERROR(cudaGetLastError());
 
     return MV(g);
@@ -207,7 +205,7 @@ public:
     : cuda_async_value_base(MV(s), MV(k))
   {}
 
-  void set_value(T&& v) &&
+  void set_value(T&& v)
   {
     *content_ = FWD(v);
     semaphore_->store(true, std::memory_order_release); 
@@ -238,7 +236,7 @@ private:
 public:
   void set_value(T&& value) &&
   {
-    MV(*ss_).set_value(FWD(value));
+    ss_->set_value(FWD(value));
     ss_.reset();
   }
 };

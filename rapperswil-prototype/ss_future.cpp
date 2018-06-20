@@ -65,7 +65,7 @@ struct ss_executor final
 
     auto&& fexec = MV(f).executor();
     auto&& fss = MV(f).shared_state();
-    MV(*fss).set_trigger(
+    fss->set_trigger(
       [op = FWD(op), p = MV(p), fexec = MV(fexec)] (T v) mutable
       {
         fexec.execute(
@@ -92,7 +92,7 @@ struct ss_executor final
     auto h = f.exec.then_execute(FWD(op), MV(g));
 
     auto&& fss = MV(f).shared_state();
-    MV(*fss)->set_trigger([p = MV(p)] (T v) mutable { MV(p).set_value(MV(v)); });
+    fss->set_trigger([p = MV(p)] (T v) mutable { MV(p).set_value(MV(v)); });
     fss.reset();
 
     return MV(h);
@@ -139,7 +139,7 @@ public:
     : mutex_(), content_(), trigger_(), has_content_(false), has_trigger_(false)
   {}
 
-  void set_value(T&& v) &&
+  void set_value(T&& v)
   {
     bool run_trigger = false;
     decltype(trigger_) t;
@@ -162,7 +162,7 @@ public:
   }
   
   template <typename Trigger>
-  void set_trigger(Trigger&& t) &&
+  void set_trigger(Trigger&& t)
   {
     bool run_trigger = false;
     T v; // TODO: Should be an `optional`.
@@ -221,7 +221,7 @@ private:
 public:
   void set_value(T&& value) &&
   {
-    MV(*ss_).set_value(FWD(value));
+    ss_->set_value(FWD(value));
     ss_.reset();
   }
 };
