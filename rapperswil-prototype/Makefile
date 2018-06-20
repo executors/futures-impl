@@ -7,7 +7,7 @@ else
 	FLAGS+=-O3 
 endif
 
-CXX_FLAGS=-std=c++17 -pthread
+CXX_FLAGS=-std=c++14 -pthread
 NVCC_FLAGS+=-std=c++14 --expt-extended-lambda -gencode arch=compute_61,\"code=sm_61\" -gencode arch=compute_61,\"code=compute_61\" -lcuda
 INCLUDES=-I.
 CU_SOURCES=$(shell ls -1 *.cu)
