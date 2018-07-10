@@ -16,7 +16,7 @@
 
 struct cuda_stream_deleter final
 {
-  void operator()(cudaStream_t s) const
+  void operator()(CUstream_st* s) const
   {
     if (nullptr != s)
       THROW_ON_CUDA_RT_ERROR(cudaStreamDestroy(s));
@@ -36,7 +36,7 @@ public:
     ptr.reset(s, cuda_stream_deleter{});
   }
 
-  cuda_stream(cuda_stream const&) = default;
+  cuda_stream(cuda_stream const&) = delete;
   cuda_stream(cuda_stream&&) = default;
 
   CUstream_st& operator*() const
