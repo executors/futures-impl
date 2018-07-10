@@ -18,7 +18,9 @@
 template <typename T>
 struct cuda_free_deleter final
 {
-  void operator()(T* p) const
+  using pointer = T*;
+
+  void operator()(pointer p) const
   {
     if (nullptr != p)
     {
@@ -31,7 +33,9 @@ struct cuda_free_deleter final
 template <typename T>
 struct cuda_free_host_deleter final
 {
-  void operator()(T* p) const
+  using pointer = T*;
+
+  void operator()(pointer p) const
   {
     if (nullptr != p)
     {
