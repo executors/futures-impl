@@ -169,7 +169,7 @@ public:
   {}
 
   cuda_async_value_base(cuda_stream&& s, keep_alive_type&& k)
-    : stream_(s), semaphore_(0), keep_alive_(k)
+    : stream_(MV(s)), semaphore_(0), keep_alive_(k)
   {}
 
   virtual ~cuda_async_value_base() {}
@@ -179,7 +179,12 @@ public:
     return stream_.get();
   }
 
-  cuda_stream shared_stream() const
+  cuda_stream& shared_stream()
+  {
+    return stream_;
+  }
+
+  cuda_stream const& shared_stream() const
   {
     return stream_;
   }
