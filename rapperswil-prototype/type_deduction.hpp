@@ -41,6 +41,16 @@
   { return (__VA_ARGS__); }                                                   \
   /**/
 
+/// \def AUTORETURNS(...)
+/// \brief Expands to a function definition, including a trailing returning
+///        type, that returns the expression <tt>__VA_ARGS__</tt>.
+///
+#define AUTORETURNS(...)                                                      \
+  -> decltype(__VA_ARGS__)                                                    \
+  noexcept(noexcept(decltype(__VA_ARGS__)(__VA_ARGS__)))                      \
+  { return (__VA_ARGS__); }                                                   \
+  /**/
+
 ///////////////////////////////////////////////////////////////////////////////
 
 #endif // FUTURES_TYPE_DEDUCTION_HPP
