@@ -126,8 +126,6 @@
   _49,_50,_51,_52,_53,_54,_55,_56,_57,_58,_59,_60,_61,_62,_63,  N,...) N      \
   /**/
 
-#define FOO(...) PP_EXPAND(PP_CAT2(FOO_, PP_ARITY(__VA_ARGS__))(__VA_ARGS__))
-
 /// \def PP_DISPATCH(basename, ...)
 /// \brief Expands to <tt>basenameN(...)</tt>, where <tt>N</tt> is the number
 ///        of variadic arguments that \a PP_DISPATCH was called with. This macro
