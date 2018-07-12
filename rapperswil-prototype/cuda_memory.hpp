@@ -1,5 +1,5 @@
-// Copyright (c)      2018 NVIDIA Corporation 
-//                         (Bryce Adelstein Lelbach <brycelelbach@gmail.com>)
+// Copyright (c) 2018 NVIDIA Corporation
+// Author: Bryce Adelstein Lelbach <brycelelbach@gmail.com>
 //
 // Distributed under the Boost Software License v1.0 (boost.org/LICENSE_1_0.txt)
 
@@ -16,17 +16,41 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
+struct cuda_free_uninitialized_deleter final
+{
+  using pointer = T*;
+
+  void operator()(pointer raw) const
+  {
+    if (nullptr != raw)
+      THROW_ON_CUDA_RT_ERROR(cudaFree(const_cast<std::remove_cv_t<T>*>(raw)));
+  }
+};
+
+template <typename T>
 struct cuda_free_deleter final
 {
   using pointer = T*;
 
-  void operator()(pointer p) const
+  void operator()(pointer raw) const
   {
-    if (nullptr != p)
+    if (nullptr != raw)
     {
-      p->~T();
-      THROW_ON_CUDA_RT_ERROR(cudaFree(const_cast<std::remove_cv_t<T>*>(p)));
+      raw->~T();
+      THROW_ON_CUDA_RT_ERROR(cudaFree(const_cast<std::remove_cv_t<T>*>(raw)));
     }
+  }
+};
+
+template <typename T>
+struct cuda_free_host_uninitialized_deleter final
+{
+  using pointer = T*;
+
+  void operator()(pointer raw) const
+  {
+    if (nullptr != raw)
+      THROW_ON_CUDA_RT_ERROR(cudaFreeHost(const_cast<std::remove_cv_t<T>*>(raw)));
   }
 };
 
@@ -35,115 +59,111 @@ struct cuda_free_host_deleter final
 {
   using pointer = T*;
 
-  void operator()(pointer p) const
+  void operator()(pointer raw) const
   {
-    if (nullptr != p)
+    if (nullptr != raw)
     {
-      p->~T();
-      THROW_ON_CUDA_RT_ERROR(cudaFreeHost(const_cast<std::remove_cv_t<T>*>(p)));
+      raw->~T();
+      THROW_ON_CUDA_RT_ERROR(cudaFreeHost(const_cast<std::remove_cv_t<T>*>(raw)));
     }
   }
 };
 
+///////////////////////////////////////////////////////////////////////////////
+
 template <typename T>
-struct cuda_host_pinned_unique_ptr final
+auto cuda_make_host_pinned_uninitialized_unique()
 {
-private:
+  std::unique_ptr<T, cuda_free_host_uninitialized_deleter<T>> ptr;
+
+  T* raw;
+  THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&raw, sizeof(T), cudaHostAllocDefault));
+  ptr.reset(raw); // This is `noexcept`.
+
+  return ptr;
+}
+
+template <typename T>
+using cuda_host_pinned_uninitialized_unique_ptr
+  = std::unique_ptr<T, cuda_free_host_uninitialized_deleter<T>>;
+
+template <typename T>
+auto cuda_make_host_pinned_default_unique()
+{
   std::unique_ptr<T, cuda_free_host_deleter<T>> ptr;
 
-public:
-  cuda_host_pinned_unique_ptr()
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&v, sizeof(T), 0));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T;
-    ptr.reset(v);
-  }
+  auto uptr = cuda_make_host_pinned_uninitialized_unique<T>();
+  ptr.reset(uptr.release()); // These are both `noexcept`.
 
-  cuda_host_pinned_unique_ptr(T&& t)
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&v, sizeof(T), 0));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T(move(t));
-    ptr.reset(v);
-  }
+  new (const_cast<std::remove_cv_t<T>*>(ptr.get())) T;
 
-  cuda_host_pinned_unique_ptr(T const& t)
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaHostAlloc(&v, sizeof(T), 0));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T(t);
-    ptr.reset(v);
-  }
-
-  cuda_host_pinned_unique_ptr(cuda_host_pinned_unique_ptr const&) = delete;
-  cuda_host_pinned_unique_ptr(cuda_host_pinned_unique_ptr&&) = default;
-
-  T& operator*() const
-  {
-    return *ptr.get();
-  }
-
-  T* operator->() const
-  {
-    return ptr.get();
-  }
-
-  T* get() const
-  {
-    return ptr.get();
-  }
-};
+  return ptr;
+}
 
 template <typename T>
-struct cuda_managed_unique_ptr final
+auto cuda_make_host_pinned_unique(T&& t)
 {
-private:
+  std::unique_ptr<T, cuda_free_host_deleter<T>> ptr;
+
+  auto uptr = cuda_make_host_pinned_uninitialized_unique<T>();
+  ptr.reset(uptr.release()); // These are both `noexcept`.
+
+  new (const_cast<std::remove_cv_t<T>*>(ptr.get())) T(FWD(t));
+
+  return ptr;
+}
+
+template <typename T>
+using cuda_host_pinned_unique_ptr
+  = std::unique_ptr<T, cuda_free_host_deleter<T>>;
+
+///////////////////////////////////////////////////////////////////////////////
+
+template <typename T>
+auto cuda_make_managed_uninitialized_unique()
+{
+  std::unique_ptr<T, cuda_free_uninitialized_deleter<T>> ptr;
+
+  T* raw;
+  THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&raw, sizeof(T)));
+  ptr.reset(raw); // This is `noexcept`.
+
+  return ptr;
+}
+
+template <typename T>
+using cuda_managed_uninitialized_unique_ptr
+  = std::unique_ptr<T, cuda_free_uninitialized_deleter<T>>;
+
+template <typename T>
+auto cuda_make_managed_default_unique()
+{
   std::unique_ptr<T, cuda_free_deleter<T>> ptr;
 
-public:
-  cuda_managed_unique_ptr()
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T;
-    ptr.reset(v);
-  }
+  auto uptr = cuda_make_managed_uninitialized_unique<T>();
+  ptr.reset(uptr.release()); // These are both `noexcept`.
 
-  cuda_managed_unique_ptr(T&& t)
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T(move(t));
-    ptr.reset(v);
-  }
+  new (const_cast<std::remove_cv_t<T>*>(ptr.get())) T;
 
-  cuda_managed_unique_ptr(T const& t)
-  {
-    T* v;
-    THROW_ON_CUDA_RT_ERROR(cudaMallocManaged(&v, sizeof(T)));
-    new (const_cast<std::remove_cv_t<T>*>(v)) T(t);
-    ptr.reset(v);
-  }
+  return ptr;
+}
 
-  cuda_managed_unique_ptr(cuda_managed_unique_ptr const&) = delete;
-  cuda_managed_unique_ptr(cuda_managed_unique_ptr&&) = default;
+template <typename T>
+auto cuda_make_managed_unique(T&& t)
+{
+  std::unique_ptr<T, cuda_free_deleter<T>> ptr;
 
-  T& operator*() const
-  {
-    return *ptr.get();
-  }
+  auto uptr = cuda_make_managed_uninitialized_unique<T>();
+  ptr.reset(uptr.release()); // These are both `noexcept`.
 
-  T* operator->() const
-  {
-    return ptr.get();
-  }
+  new (const_cast<std::remove_cv_t<T>*>(ptr.get())) T(FWD(t));
 
-  T* get() const
-  {
-    return ptr.get();
-  }
-};
+  return ptr;
+}
+
+template <typename T>
+using cuda_managed_unique_ptr
+  = std::unique_ptr<T, cuda_free_deleter<T>>;
 
 ///////////////////////////////////////////////////////////////////////////////
 

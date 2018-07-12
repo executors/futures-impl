@@ -1,5 +1,5 @@
-// Copyright (c)      2018 NVIDIA Corporation 
-//                         (Bryce Adelstein Lelbach <brycelelbach@gmail.com>)
+// Copyright (c) 2018 NVIDIA Corporation
+// Author: Bryce Adelstein Lelbach <brycelelbach@gmail.com>
 //
 // Distributed under the Boost Software License v1.0 (boost.org/LICENSE_1_0.txt)
 
