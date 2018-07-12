@@ -15,7 +15,6 @@
 
 #include <atomic>
 
-#include <cstdio>
 #include <cassert>
 
 template <typename T>
