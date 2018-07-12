@@ -33,7 +33,7 @@ struct cuda_executor;
 template <typename Operation>
 __global__
 void launch_impl(Operation op)
-{ 
+{
   MV(op)();
 }
 
@@ -45,7 +45,7 @@ struct cuda_executor final
   template <typename T>
   using promise = cuda_executor_promise<T>;
 
-private: 
+private:
   template <typename Operation>
   void launch(Operation&& op, cudaStream_t stream)
   {
@@ -74,7 +74,7 @@ public:
 
     launch([=] __device__ { *data = op(); }, ss->stream());
 
-    return MV(f); 
+    return MV(f);
   }
 
   // Internal -> Internal Dependent Execution.
@@ -84,7 +84,7 @@ public:
   {
     using U = RETOF(Operation, T);
 
-    auto&& fss = MV(f).shared_state(); 
+    auto&& fss = MV(f.shared_state());
 
     // Get a copy of the pointer to the data, because we're about to move from
     // `fss`.
@@ -95,7 +95,7 @@ public:
     auto ss = std::make_shared<cuda_async_value<U>>(
       MV(fss->shared_stream()), MV(fss)
     );
-    cuda_executor_future<U, cuda_executor> g(MV(ss), MV(f).executor());
+    cuda_executor_future<U, cuda_executor> g(MV(ss), MV(f.executor()));
 
     auto const& gss = g.shared_state();
 
@@ -134,7 +134,7 @@ public:
   template <typename T>
   std::pair<cuda_executor_promise<T>, cuda_executor_future<T, cuda_executor>>
   make_promise()
-  { 
+  {
     auto ss = std::make_shared<cuda_async_value<T>>(
       cuda_async_value<T>::make_semaphore()
     );
@@ -149,7 +149,7 @@ public:
     );
 
     return {MV(p), MV(f)};
-  } 
+  }
 
   template <typename T, typename Executor>
   void wait(cuda_executor_future<T, Executor>&& f)
@@ -215,7 +215,7 @@ public:
   }
 
   CUdeviceptr semaphore() const
-  { 
+  {
     return reinterpret_cast<CUdeviceptr>(semaphore_.get());
   }
 };
@@ -258,7 +258,7 @@ public:
     // TODO: Should this be rvalue-ref qualified? It is on promise.
     assert(semaphore_);
     *content_ = FWD(v);
-    semaphore_->store(true, std::memory_order_release); 
+    semaphore_->store(true, std::memory_order_release);
   }
 
   T* data() const
@@ -271,12 +271,12 @@ public:
 
 template <typename T>
 struct cuda_executor_promise final
-{ 
+{
   friend struct cuda_executor;
 
   using shared_state_type = std::shared_ptr<cuda_async_value<T>>;
 
-private:  
+private:
   shared_state_type ss_;
 
   cuda_executor_promise(shared_state_type const& s)
@@ -299,7 +299,7 @@ public:
 
 template <typename T, typename Executor>
 struct cuda_executor_future final
-{ 
+{
   friend struct cuda_executor;
 
   using shared_state_type = std::shared_ptr<cuda_async_value<T>>;
@@ -316,13 +316,11 @@ private:
     : ss_(MV(s)), exec_(e)
   {}
 
-  shared_state_type&       shared_state() &      RETURNS(ss_)
-  shared_state_type const& shared_state() const& RETURNS(ss_)
-  shared_state_type&&      shared_state() &&     RETURNS(MV(ss_))
+  shared_state_type&       shared_state()       RETURNS(ss_);
+  shared_state_type const& shared_state() const RETURNS(ss_);
 
-  Executor&       executor() &      RETURNS(exec_)
-  Executor const& executor() const& RETURNS(exec_)
-  Executor&&      executor() &&     RETURNS(MV(exec_))
+  Executor&       executor()       RETURNS(exec_);
+  Executor const& executor() const RETURNS(exec_);
 
 public:
   template <typename UExecutor>
@@ -336,7 +334,7 @@ public:
   {
     return exec_.then_execute(FWD(op), MV(*this));
   }
-}; 
+};
 
 ///////////////////////////////////////////////////////////////////////////////
 

@@ -31,9 +31,9 @@ using executor_promise_t = typename executor_promise<Executor, T>::type;
 template <typename T, typename Executor>
 std::pair<executor_promise_t<Executor, T>, executor_future_t<Executor, T>>
 make_promise(Executor exec)
-{ 
+{
   return exec.template make_promise<T>();
-} 
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 

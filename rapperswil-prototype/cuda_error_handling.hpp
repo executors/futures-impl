@@ -35,7 +35,7 @@ struct cuda_rt_exception : std::exception
   virtual char const* what() const noexcept
   {
     return message.c_str();
-  } 
+  }
 
 private:
   cudaError_t error;
@@ -60,12 +60,12 @@ struct cuda_drv_exception : std::exception
   CUresult code() const
   {
     return error;
-  } 
+  }
 
   virtual char const* what() const noexcept
-  { 
+  {
     return message.c_str();
-  } 
+  }
 
 private:
   CUresult error;
@@ -76,7 +76,7 @@ inline void throw_on_cuda_rt_error(cudaError_t error, char const* message)
 {
   if (cudaSuccess != error)
     throw cuda_rt_exception(error, message);
-} 
+}
 
 #define THROW_ON_CUDA_RT_ERROR(error)                                         \
   throw_on_cuda_rt_error(error, CURRENT_FUNCTION)                             \

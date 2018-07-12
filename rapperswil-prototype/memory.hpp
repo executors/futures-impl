@@ -64,19 +64,19 @@ ForwardIt constexpr destroy_n(Allocator&& alloc, ForwardIt first, Size n)
 }
 
 template <typename T>
-void constexpr destroy_at(T* location) 
+void constexpr destroy_at(T* location)
 {
   location->~T();
 }
 
 template <typename Allocator, typename T>
-void constexpr destroy_at(Allocator&& alloc, T* location) 
+void constexpr destroy_at(Allocator&& alloc, T* location)
 {
   using traits = typename std::allocator_traits<
     std::remove_cv_t<std::remove_reference_t<Allocator>>
   >::template rebind_traits<T>;
   auto alloc_T = typename traits::allocator_type(FWD(alloc));
- 
+
   traits::destroy(FWD(alloc), location);
 }
 
@@ -164,7 +164,7 @@ struct allocator_delete final
 {
   using allocator_type
     = typename std::remove_cv_t<std::remove_reference_t<Allocator>>::template
-      rebind<T>::other; 
+      rebind<T>::other;
   using pointer = typename std::allocator_traits<allocator_type>::pointer;
 
   template <typename UAllocator>
@@ -202,7 +202,7 @@ struct allocator_delete final
     return *this;
   }
 
-  void operator()(pointer p) 
+  void operator()(pointer p)
   {
     using traits = std::allocator_traits<allocator_type>;
 
@@ -231,7 +231,7 @@ struct allocator_array_delete final
 {
   using allocator_type
     = typename std::remove_cv_t<std::remove_reference_t<Allocator>>::template
-      rebind<T>::other; 
+      rebind<T>::other;
   using pointer = typename std::allocator_traits<allocator_type>::pointer;
 
   template <typename UAllocator>
@@ -271,7 +271,7 @@ struct allocator_array_delete final
     return *this;
   }
 
-  void operator()(pointer p) 
+  void operator()(pointer p)
   {
     using traits = std::allocator_traits<allocator_type>;
 

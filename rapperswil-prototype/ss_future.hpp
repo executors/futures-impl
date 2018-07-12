@@ -49,7 +49,7 @@ struct ss_executor final
   ss_executor_future<RETOF(Operation), ss_executor>
   twoway_execute(Operation&& op) const
   {
-    using U = RETOF(Operation); 
+    using U = RETOF(Operation);
 
     auto ss = std::make_shared<ss_async_value<U>>();
     ss_executor_future<U, ss_executor> f(ss, *this);
@@ -65,7 +65,7 @@ struct ss_executor final
   ss_executor_future<RETOF(Operation, T), ss_executor>
   then_execute(Operation&& op, ss_executor_future<T, ss_executor>&& f) const
   {
-    using U = RETOF(Operation, T); 
+    using U = RETOF(Operation, T);
 
     auto ss = std::make_shared<ss_async_value<U>>();
     ss_executor_future<U, ss_executor> g(ss, *this);
@@ -157,7 +157,7 @@ public:
       if (has_trigger_)
         { t = MV(trigger_); run_trigger = true; }
       else
-        { content_ = FWD(v); has_content_ = true; }   
+        { content_ = FWD(v); has_content_ = true; }
     }
 
     if (run_trigger)
@@ -168,7 +168,7 @@ public:
       has_content_ = true;
     }
   }
-  
+
   template <typename Trigger>
   void set_trigger(Trigger&& t)
   {
@@ -219,7 +219,7 @@ struct ss_executor_promise final
 
   using shared_state_type = std::shared_ptr<ss_async_value<T>>;
 
-private:    
+private:
   shared_state_type ss_;
 
   ss_executor_promise(std::shared_ptr<ss_async_value<T>> s)
@@ -270,7 +270,7 @@ public:
   executor_future_t<Executor, RETOF(Operation, T)> then(Operation&& op) &&
   {
     return exec_.then_execute(FWD(op), MV(*this));
-  } 
+  }
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -17,7 +17,7 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << PP_CAT2(1, PP_CAT2(2, 3)) << std::endl;
@@ -28,7 +28,7 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << 123 << std::endl;
@@ -49,7 +49,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 
 /// \def PP_EXPAND(x)
-/// \brief Performs macro expansion on \a x. 
+/// \brief Performs macro expansion on \a x.
 ///
 /// \par <b>Example</b>:
 ///
@@ -69,7 +69,7 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << "foo_bar" << std::endl;
@@ -87,7 +87,7 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << PP_ARITY()        << std::endl
@@ -101,7 +101,7 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << 0 << std::endl
@@ -135,17 +135,17 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// #define PLUS(...) PP_DISPATCH(PLUS, __VA_ARGS__)
 /// #define PLUS1(x)       x
 /// #define PLUS2(x, y)    x + y
 /// #define PLUS3(x, y, z) x + y + z
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << PLUS(1)       << std::endl
 ///             << PLUS(1, 2)    << std::endl
-///             << PLUS(1, 2, 3) << std::endl; 
+///             << PLUS(1, 2, 3) << std::endl;
 /// }
 /// \endcode
 ///
@@ -153,17 +153,17 @@
 ///
 /// \code
 /// #include <iostream>
-/// 
+///
 /// #define PLUS(...) PP_DISPATCH(PLUS, __VA_ARGS__)
 /// #define PLUS1(x)       x
 /// #define PLUS2(x, y)    x + y
 /// #define PLUS3(x, y, z) x + y + z
-/// 
+///
 /// int main()
 /// {
 ///   std::cout << 1         << std::endl
 ///             << 1 + 2     << std::endl
-///             << 1 + 2 + 3 << std::endl; 
+///             << 1 + 2 + 3 << std::endl;
 /// }
 /// \endcode
 ///
