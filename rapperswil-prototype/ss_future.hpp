@@ -14,6 +14,8 @@
 #include <condition_variable>
 #include <thread>
 
+#include <typeinfo>
+
 template <typename T>
 struct ss_async_value;
 
@@ -52,7 +54,7 @@ struct ss_executor final
     using U = RETOF(Operation);
 
     auto ss = std::make_shared<ss_async_value<U>>();
-    ss_executor_future<U, ss_executor> f(ss, *this);
+    ss_executor_future<U, ss_executor> f(ss, *this, *this);
     ss_executor_promise<U> p(ss);
 
     execute([op = FWD(op), p = MV(p)] () mutable { MV(p).set_value(op()); });
@@ -68,11 +70,11 @@ struct ss_executor final
     using U = RETOF(Operation, T);
 
     auto ss = std::make_shared<ss_async_value<U>>();
-    ss_executor_future<U, ss_executor> g(ss, *this);
+    ss_executor_future<U, ss_executor> g(ss, f.next_executor(), *this);
     ss_executor_promise<U> p(ss);
 
-    auto&& fexec = MV(f).executor();
-    auto&& fss = MV(f).shared_state();
+    auto&& fexec = MV(f.next_executor());
+    auto&& fss = MV(f.shared_state());
     fss->set_trigger(
       [op = FWD(op), p = MV(p), fexec = MV(fexec)] (T v) mutable
       {
@@ -88,18 +90,18 @@ struct ss_executor final
 
   // Internal -> External Dependent Execution.
   template <typename Operation, typename T, typename Executor>
-  ss_executor_future<RETOF(Operation, T), Executor>
-  then_execute(Operation&& op, ss_executor_future<T, Executor>&& f) &&
+  executor_future_t<Executor, RETOF(Operation, T)>
+  then_execute(Operation&& op, ss_executor_future<T, Executor>&& f) const
   {
     using U = RETOF(Operation, T);
 
-    auto p_g = make_promise<U>(f.exec);
+    auto p_g = ::make_promise<T>(f.next_executor());
     auto& p  = p_g.first;
     auto& g  = p_g.second;
 
-    auto h = f.exec.then_execute(FWD(op), MV(g));
+    auto h = MV(f.next_executor()).then_execute(FWD(op), MV(g));
 
-    auto&& fss = MV(f).shared_state();
+    auto&& fss = MV(f.shared_state());
     fss->set_trigger([p = MV(p)] (T v) mutable { MV(p).set_value(MV(v)); });
     fss.reset();
 
@@ -111,7 +113,7 @@ struct ss_executor final
   make_promise() const
   {
     auto ss = std::make_shared<ss_async_value<T>>();
-    ss_executor_future<T, ss_executor> f(ss, *this);
+    ss_executor_future<T, ss_executor> f(ss, *this, *this);
     ss_executor_promise<T> p(ss);
     return {MV(p), MV(f)};
   }
@@ -236,40 +238,58 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T, typename Executor>
+template <typename T, typename NextExecutor>
 struct ss_executor_future final
 {
   friend struct ss_executor;
+
+  template <typename U, typename UNextExecutor>
+  friend struct ss_executor_future;
+
+  template <typename U>
+  friend struct ss_semi_future;
 
   using shared_state_type = std::shared_ptr<ss_async_value<T>>;
 
 private:
   shared_state_type ss_;
-  Executor          exec_;
+  ss_executor       this_executor_;
+  NextExecutor      next_executor_;
 
-  ss_executor_future(shared_state_type s, Executor e)
-    : ss_(s), exec_(e)
+  ss_executor_future(
+      shared_state_type const& s, ss_executor te, NextExecutor ne
+    )
+    : ss_(s), this_executor_(te), next_executor_(MV(ne))
   {}
 
-  shared_state_type&       shared_state() &      RETURNS(ss_)
-  shared_state_type const& shared_state() const& RETURNS(ss_)
-  shared_state_type&&      shared_state() &&     RETURNS(MV(ss_))
+  ss_executor_future(
+      shared_state_type&& s, ss_executor te, NextExecutor ne
+    )
+    : ss_(MV(s)), this_executor_(te), next_executor_(MV(ne))
+  {}
 
-  Executor&       executor() &      RETURNS(exec_)
-  Executor const& executor() const& RETURNS(exec_)
-  Executor&&      executor() &&     RETURNS(MV(exec_))
+  shared_state_type&       shared_state()       RETURNS(ss_);
+  shared_state_type const& shared_state() const RETURNS(ss_);
+
+  ss_executor&       this_executor()       RETURNS(this_executor_);
+  ss_executor const& this_executor() const RETURNS(this_executor_);
+
+  NextExecutor&       next_executor()       RETURNS(next_executor_);
+  NextExecutor const& next_executor() const RETURNS(next_executor_);
 
 public:
-  template <typename UExecutor>
-  ss_executor_future<T, UExecutor> via(UExecutor&& exec) &&
+  template <typename UNextExecutor>
+  auto via(UNextExecutor&& exec) &&
   {
-    return ss_executor_future<T, UExecutor>(MV(ss_), FWD(exec));
+    return ss_executor_future<
+      T, std::remove_cv_t<std::remove_reference_t<UNextExecutor>>
+    >(MV(ss_), MV(this_executor_), FWD(exec));
   }
 
   template <typename Operation>
-  executor_future_t<Executor, RETOF(Operation, T)> then(Operation&& op) &&
+  executor_future_t<NextExecutor, RETOF(Operation, T)> then(Operation&& op) &&
   {
-    return exec_.then_execute(FWD(op), MV(*this));
+    return this_executor_.then_execute(FWD(op), MV(*this));
   }
 };
 
@@ -285,9 +305,11 @@ private:
 
 public:
   template <typename UExecutor>
-  ss_executor_future<T, UExecutor> via(UExecutor&& exec) &&
+  auto via(UExecutor&& exec) &&
   {
-    return ss_executor_future<T, UExecutor>(MV(ss_), FWD(exec));
+    return ss_executor_future<
+      T, std::remove_cv_t<std::remove_reference_t<UExecutor>>
+    >(MV(ss_), FWD(exec));
   }
 };
 

@@ -47,7 +47,7 @@ struct cuda_executor final
 
 private:
   template <typename Operation>
-  void launch(Operation&& op, cudaStream_t stream)
+  void launch(Operation&& op, cudaStream_t stream) const
   {
     launch_impl<<<1, 1, 0, stream>>>(op);
     THROW_ON_CUDA_RT_ERROR(cudaGetLastError());
@@ -55,20 +55,20 @@ private:
 
 public:
   template <typename Operation>
-  void execute(Operation&& op)
+  void execute(Operation&& op) const
   {
     launch(FWD(op), nullptr);
   }
 
   template <typename Operation>
   cuda_executor_future<RETOF(Operation), cuda_executor>
-  twoway_execute(Operation&& op)
+  twoway_execute(Operation&& op) const
   {
     using U = RETOF(Operation);
 
     // Create a future with a new stream.
     auto ss = std::make_shared<cuda_async_value<U>>();
-    cuda_executor_future<U, cuda_executor> f(ss, *this);
+    cuda_executor_future<U, cuda_executor> f(ss, *this, *this);
 
     auto data = ss->data();
 
@@ -80,7 +80,7 @@ public:
   // Internal -> Internal Dependent Execution.
   template <typename Operation, typename T>
   cuda_executor_future<RETOF(Operation, T), cuda_executor>
-  then_execute(Operation&& op, cuda_executor_future<T, cuda_executor>&& f)
+  then_execute(Operation&& op, cuda_executor_future<T, cuda_executor>&& f) const
   {
     using U = RETOF(Operation, T);
 
@@ -95,7 +95,9 @@ public:
     auto ss = std::make_shared<cuda_async_value<U>>(
       MV(fss->shared_stream()), MV(fss)
     );
-    cuda_executor_future<U, cuda_executor> g(MV(ss), MV(f.executor()));
+    cuda_executor_future<U, cuda_executor> g(
+      MV(ss), MV(f.next_executor()), *this
+    );
 
     auto const& gss = g.shared_state();
 
@@ -109,36 +111,54 @@ public:
 
   // Internal -> External Dependent Execution.
   template <typename Operation, typename T, typename Executor>
-  cuda_executor_future<RETOF(Operation, T), Executor>
-  then_execute(Operation&& op, cuda_executor_future<T, Executor>&& f)
+  executor_future_t<Executor, RETOF(Operation, T)>
+  then_execute(Operation&& op, cuda_executor_future<T, Executor>&& f) const
   {
     using U = RETOF(Operation, T);
 
-    auto p_g = make_promise<U>(f.executor());
+    auto p_g = ::make_promise<T>(f.next_executor());
     auto& p  = p_g.first;
     auto& g  = p_g.second;
 
-    auto h = f.executor().then_execute(FWD(op), MV(g));
+    auto h = MV(f.next_executor()).then_execute(FWD(op), MV(g));
 
     auto const& fss = f.shared_state();
+
+    auto outer_tmp = std::make_unique<
+      std::tuple<executor_promise_t<Executor, T>, T*>
+    >(
+      MV(p), fss->data()
+    );
+
     THROW_ON_CUDA_RT_ERROR(
       cudaStreamAddCallback(
         fss->stream(),
-        [fss = MV(fss), p = MV(p)] { MV(p).set_value(MV(fss->data())); }
+        [] (CUstream_st*, cudaError_t, void* tmp_ptr)
+        {
+          using tmp_type         = decltype(outer_tmp);
+          using tmp_element_type = typename tmp_type::element_type;
+          tmp_type inner_tmp(reinterpret_cast<tmp_element_type*>(tmp_ptr));
+
+          MV(std::get<0>(*inner_tmp)).set_value(MV(*std::get<1>(*inner_tmp)));
+        },
+        outer_tmp.get(),
+        0
       )
     );
+
+    outer_tmp.release();
 
     return MV(h);
   }
 
   template <typename T>
   std::pair<cuda_executor_promise<T>, cuda_executor_future<T, cuda_executor>>
-  make_promise()
+  make_promise() const
   {
     auto ss = std::make_shared<cuda_async_value<T>>(
       cuda_async_value<T>::make_semaphore()
     );
-    cuda_executor_future<T, cuda_executor> f(ss, *this);
+    cuda_executor_future<T, cuda_executor> f(ss, *this, *this);
     cuda_executor_promise<T> p(ss);
 
     auto const& fss = f.shared_state();
@@ -152,7 +172,7 @@ public:
   }
 
   template <typename T, typename Executor>
-  void wait(cuda_executor_future<T, Executor>&& f)
+  void wait(cuda_executor_future<T, Executor>&& f) const
   {
     auto const& fss = f.shared_state();
     THROW_ON_CUDA_RT_ERROR(cudaStreamSynchronize(fss->stream()));
@@ -297,42 +317,58 @@ public:
 
 ///////////////////////////////////////////////////////////////////////////////
 
-template <typename T, typename Executor>
+template <typename T, typename NextExecutor>
 struct cuda_executor_future final
 {
   friend struct cuda_executor;
+
+  template <typename U, typename UNextExecutor>
+  friend struct cuda_executor_future;
+
+  template <typename U>
+  friend struct cuda_semi_future;
 
   using shared_state_type = std::shared_ptr<cuda_async_value<T>>;
 
 private:
   shared_state_type ss_;
-  Executor          exec_;
+  cuda_executor     this_executor_;
+  NextExecutor      next_executor_;
 
-  cuda_executor_future(shared_state_type const& s, Executor e)
-    : ss_(s), exec_(e)
+  cuda_executor_future(
+      shared_state_type const& s, cuda_executor te, NextExecutor ne
+    )
+    : ss_(s), this_executor_(te), next_executor_(MV(ne))
   {}
 
-  cuda_executor_future(shared_state_type&& s, Executor e)
-    : ss_(MV(s)), exec_(e)
+  cuda_executor_future(
+      shared_state_type&& s, cuda_executor te, NextExecutor ne
+    )
+    : ss_(MV(s)), this_executor_(te), next_executor_(MV(ne))
   {}
 
   shared_state_type&       shared_state()       RETURNS(ss_);
   shared_state_type const& shared_state() const RETURNS(ss_);
 
-  Executor&       executor()       RETURNS(exec_);
-  Executor const& executor() const RETURNS(exec_);
+  cuda_executor&       this_executor()       RETURNS(this_executor_);
+  cuda_executor const& this_executor() const RETURNS(this_executor_);
+
+  NextExecutor&       next_executor()       RETURNS(next_executor_);
+  NextExecutor const& next_executor() const RETURNS(next_executor_);
 
 public:
-  template <typename UExecutor>
-  cuda_executor_future<T, UExecutor> via(UExecutor&& exec) &&
+  template <typename UNextExecutor>
+  auto via(UNextExecutor&& exec) &&
   {
-    return cuda_executor_future<T, UExecutor>(MV(ss_), FWD(exec_));
+    return cuda_executor_future<
+      T, std::remove_cv_t<std::remove_reference_t<UNextExecutor>>
+    >(MV(ss_), MV(this_executor_), FWD(exec));
   }
 
   template <typename Operation>
-  executor_future_t<Executor, RETOF(Operation, T)> then(Operation&& op) &&
+  executor_future_t<NextExecutor, RETOF(Operation, T)> then(Operation&& op) &&
   {
-    return exec_.then_execute(FWD(op), MV(*this));
+    return this_executor_.then_execute(FWD(op), MV(*this));
   }
 };
 
@@ -348,9 +384,11 @@ private:
 
 public:
   template <typename UExecutor>
-  cuda_executor_future<T, UExecutor> via(UExecutor&& exec) &&
+  auto via(UExecutor&& exec) &&
   {
-    return cuda_executor_future<T, UExecutor>(MV(ss_), FWD(exec));
+    return cuda_executor_future<
+      T, std::remove_cv_t<std::remove_reference_t<UExecutor>>
+    >(MV(ss_), FWD(exec));
   }
 };
 
