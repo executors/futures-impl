@@ -34,10 +34,10 @@ int main()
       [] { printf("0\n"); return 17; });
 
     auto g = MV(f).then(
-      [] (int x) { printf("%u\n", x); return 3.14; }); 
+      [] (int x) { printf("%u\n", x); return 3.14; });
 
     auto h = MV(g).then(
-      [] (double x) { printf("%g\n", x); return 42; }); 
+      [] (double x) { printf("%g\n", x); return 42; });
 
     exec.wait(MV(h));
   }
