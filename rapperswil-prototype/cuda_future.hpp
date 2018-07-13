@@ -344,13 +344,13 @@ struct cuda_semi_future final
   using shared_state_type = std::shared_ptr<cuda_async_value<T>>;
 
 private:
-  shared_state_type cuda_;
+  shared_state_type ss_;
 
 public:
   template <typename UExecutor>
   cuda_executor_future<T, UExecutor> via(UExecutor&& exec) &&
   {
-    return cuda_executor_future<T, UExecutor>(MV(cuda_), FWD(exec));
+    return cuda_executor_future<T, UExecutor>(MV(ss_), FWD(exec));
   }
 };
 
